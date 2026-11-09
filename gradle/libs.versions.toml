@@ -1,14 +1,17 @@
 [versions]
 agp = "8.13.2"
-kotlin = "1.9.22"
+kotlin = "2.0.21"
 coreKtx = "1.13.1"
 junit = "4.13.2"
 junitVersion = "1.1.5"
 espressoCore = "3.5.1"
-kotlinxSerializationJson = "1.6.0"
+kotlinxSerializationJson = "1.7.3"
+kotlinxCoroutines = "1.7.1"
 lifecycleRuntimeKtx = "2.7.0"
 activityCompose = "1.9.0"
 composeBom = "2024.05.00"
+glance = "1.1.1"
+navigation = "2.7.7"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -25,13 +28,17 @@ androidx-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-toolin
 androidx-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-manifest" }
 androidx-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-test-junit4" }
 androidx-material3 = { group = "androidx.compose.material3", name = "material3" }
+androidx-foundation = { group = "androidx.compose.foundation", name = "foundation" }
+androidx-animation = { group = "androidx.compose.animation", name = "animation" }
+androidx-material-icons-core = { group = "androidx.compose.material", name = "material-icons-core" }
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinxSerializationJson" }
-glance = { group = "androidx.glance", name = "glance-appwidget", version = "1.1.0-beta02" }
-glance-material = { group = "androidx.glance", name = "glance-material3", version = "1.1.0-beta02" }
-navigation = {group="androidx.navigation",name="navigation-compose",version="2.7.7"}
-
+kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "kotlinxCoroutines" }
+glance = { group = "androidx.glance", name = "glance-appwidget", version.ref = "glance" }
+glance-material = { group = "androidx.glance", name = "glance-material3", version.ref = "glance" }
+navigation = { group = "androidx.navigation", name = "navigation-compose", version.ref = "navigation" }
 
 [plugins]
 androidApplication = { id = "com.android.application", version.ref = "agp" }
 jetbrainsKotlinAndroid = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
-
+composeCompiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+jetbrainsKotlinSerialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
