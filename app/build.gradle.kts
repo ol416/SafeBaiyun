@@ -2,7 +2,6 @@ plugins {
     alias(libs.plugins.androidApplication)
     alias(libs.plugins.jetbrainsKotlinAndroid)
     alias(libs.plugins.composeCompiler)
-    alias(libs.plugins.jetbrainsKotlinSerialization)
 }
 
 android {
@@ -66,7 +65,6 @@ dependencies {
     implementation(libs.androidx.animation)
     // Icons.Filled.* / Icons.AutoMirrored.*：Material3 1.3.0 起已移除对 material-icons-core 的依赖
     implementation(libs.androidx.material.icons.core)
-    implementation(libs.kotlinx.serialization.json)
     // GlobalScope / launch / Dispatchers.Main / MutableStateFlow 的直接来源
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.glance)
