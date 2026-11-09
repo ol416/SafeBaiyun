@@ -1,3 +1,5 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 plugins {
     alias(libs.plugins.androidApplication)
     alias(libs.plugins.jetbrainsKotlinAndroid)
@@ -6,12 +8,12 @@ plugins {
 
 android {
     namespace = "cn.huacheng.safebaiyun"
-    compileSdk = 34
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "cn.huacheng.safebaiyun"
         minSdk = 21
-        targetSdk = 34
+        targetSdk = 37
         versionCode = 2
         versionName = "1.1"
 
@@ -35,9 +37,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_1_8
         targetCompatibility = JavaVersion.VERSION_1_8
     }
-    kotlinOptions {
-        jvmTarget = "1.8"
-    }
     buildFeatures {
         compose = true
     }
@@ -45,6 +44,13 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+    }
+}
+
+// Kotlin 2.0+ 推荐写法：kotlinOptions 已弃用，编译选项统一走 compilerOptions
+kotlin {
+    compilerOptions {
+        jvmTarget = JvmTarget.JVM_1_8
     }
 }
 
