@@ -48,7 +48,7 @@ jobs:
           cache: gradle
 
       - name: 配置 Android SDK 命令行工具
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: 读取项目构建参数
         id: meta
