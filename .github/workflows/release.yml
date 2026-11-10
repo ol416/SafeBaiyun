@@ -1,0 +1,172 @@
+# 构建 Release APK：
+# - 手动触发：Actions → 编译 Release APK → Run workflow，产物在 Artifacts 中下载
+# - 推送 v* tag：自动构建并发布到 GitHub Release
+# - 可选签名 Secrets（四项全部配置后才启用正式签名）：
+#     SIGNING_KEYSTORE_BASE64   keystore 文件的 base64（Linux: base64 -w0 release.jks）
+#     SIGNING_KEYSTORE_PASSWORD keystore 密码
+#     SIGNING_KEY_ALIAS         密钥别名
+#     SIGNING_KEY_PASSWORD      密钥密码
+# - 未配置时使用一次性 CI 密钥签名，APK 可直接安装，但每次签名不同，不能覆盖升级安装
+
+name: 编译 Release APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: '可选：填写后同时发布 GitHub Release（如 v1.1）；留空则只上传 APK'
+        required: false
+        default: ''
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: 配置 Android SDK 命令行工具
+        uses: android-actions/setup-android@v3
+
+      - name: 读取项目构建参数
+        id: meta
+        run: |
+          set -euo pipefail
+          VERSION_NAME=$(sed -n 's/.*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n1)
+          COMPILE_SDK=$(sed -n 's/.*compileSdk[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' app/build.gradle.kts | head -n1)
+          [ -n "$VERSION_NAME" ] || { echo "::error::无法解析 versionName"; exit 1; }
+          [ -n "$COMPILE_SDK" ] || { echo "::error::无法解析 compileSdk"; exit 1; }
+          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "compile_sdk=$COMPILE_SDK" >> "$GITHUB_OUTPUT"
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+
+      - name: 适配 CI 环境
+        run: |
+          set -euo pipefail
+          # gradle.properties 中的 org.gradle.java.home 指向开发者本机 Windows JDK，CI 上必须移除
+          sed -i '/^org\.gradle\.java\.home=/d' gradle.properties
+          # Windows 检出的 gradlew 可能带 CRLF 且没有可执行权限
+          sed -i 's/\r$//' gradlew
+          chmod +x gradlew
+
+      - name: 安装 Android SDK 组件
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          yes | sdkmanager --licenses > /dev/null || true
+          # 安装最新稳定版 build-tools，供 zipalign / apksigner 使用
+          LATEST_BT=$(sdkmanager --list | grep -oE 'build-tools;[0-9]+\.[0-9]+\.[0-9]+' | cut -d';' -f2 | sort -Vu | tail -n1 || true)
+          if [ -n "$LATEST_BT" ]; then
+            sdkmanager --install "build-tools;$LATEST_BT" || true
+          fi
+          sdkmanager --install "platform-tools" "platforms;android-${{ steps.meta.outputs.compile_sdk }}"
+
+      - name: 编译 Release APK
+        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
+
+      - name: 对齐并签名 APK
+        env:
+          SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          SIGNING_KEYSTORE_PASSWORD: ${{ secrets.SIGNING_KEYSTORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          APK_SRC=$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' -print -quit 2>/dev/null || true)
+          [ -n "$APK_SRC" ] || { echo "::error::未找到 assembleRelease 产物"; exit 1; }
+          BT_DIR=$(find "$SDK_ROOT/build-tools" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -n1 || true)
+          [ -n "$BT_DIR" ] && [ -x "$BT_DIR/apksigner" ] || { echo "::error::未找到 build-tools/apksigner"; exit 1; }
+
+          mkdir -p ci-out
+          KEYSTORE="$RUNNER_TEMP/signing-keystore.p12"
+          ALIGNED="$RUNNER_TEMP/aligned.apk"
+          rm -f "$KEYSTORE" "$ALIGNED"
+
+          if [ -n "$SIGNING_KEYSTORE_BASE64" ] && [ -n "$SIGNING_KEYSTORE_PASSWORD" ] && [ -n "$SIGNING_KEY_ALIAS" ] && [ -n "$SIGNING_KEY_PASSWORD" ]; then
+            MODE=release
+            ALIAS="$SIGNING_KEY_ALIAS"
+            STORE_PASS="$SIGNING_KEYSTORE_PASSWORD"
+            KEY_PASS="$SIGNING_KEY_PASSWORD"
+            printf '%s' "$SIGNING_KEYSTORE_BASE64" | base64 -d > "$KEYSTORE"
+            KS_TYPE_ARGS=()
+            FINAL_APK="ci-out/SafeBaiyun-${VERSION_NAME}-release.apk"
+          else
+            MODE=ci
+            ALIAS=safebaiyun-ci
+            STORE_PASS=safebaiyun-ci
+            KEY_PASS=safebaiyun-ci
+            keytool -genkeypair -alias "$ALIAS" -keyalg RSA -keysize 2048 -validity 10000 \
+              -storetype PKCS12 -keystore "$KEYSTORE" -storepass "$STORE_PASS" \
+              -keypass "$KEY_PASS" -dname "CN=SafeBaiyun CI, OU=CI, O=SafeBaiyun, L=Guangzhou, ST=Guangdong, C=CN"
+            KS_TYPE_ARGS=(--ks-type PKCS12)
+            FINAL_APK="ci-out/SafeBaiyun-${VERSION_NAME}-release-ci-signed.apk"
+          fi
+
+          export APKSIGNER_KS_PASS="$STORE_PASS" APKSIGNER_KEY_PASS="$KEY_PASS"
+          "$BT_DIR/zipalign" -p -f 4 "$APK_SRC" "$ALIGNED"
+          "$BT_DIR/apksigner" sign "${KS_TYPE_ARGS[@]}" \
+            --ks "$KEYSTORE" --ks-key-alias "$ALIAS" \
+            --ks-pass env:APKSIGNER_KS_PASS --key-pass env:APKSIGNER_KEY_PASS \
+            --out "$FINAL_APK" "$ALIGNED"
+          "$BT_DIR/apksigner" verify --verbose "$FINAL_APK"
+          ls -lh "$FINAL_APK"
+
+          {
+            echo "### 构建完成"
+            echo "- 版本：$VERSION_NAME"
+            echo "- 产物：${FINAL_APK##*/}"
+            if [ "$MODE" = release ]; then
+              echo "- 签名：仓库 Secrets 中的正式密钥"
+            else
+              echo "- 签名：一次性 CI 密钥（可直接安装，但每次构建签名不同，无法覆盖升级）"
+              echo "- 需要正式签名请配置 SIGNING_KEYSTORE_BASE64 等 4 个 Secrets（见本 workflow 顶部注释）"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传 APK 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: SafeBaiyun-${{ steps.meta.outputs.version_name }}-apk
+          path: ci-out/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 发布 GitHub Release
+        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          TAG="${RELEASE_TAG:-$REF_NAME}"
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" ci-out/*.apk --clobber
+          else
+            gh release create "$TAG" ci-out/*.apk --target "$GITHUB_SHA" --title "SafeBaiyun $TAG" --generate-notes
+          fi
