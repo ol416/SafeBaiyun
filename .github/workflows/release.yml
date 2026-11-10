@@ -47,9 +47,6 @@ jobs:
           java-version: '17'
           cache: gradle
 
-      - name: 配置 Android SDK 命令行工具
-        uses: android-actions/setup-android@v3
-
       - name: 读取项目构建参数
         id: meta
         run: |
@@ -78,13 +75,24 @@ jobs:
           echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
           echo "SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
-          yes | sdkmanager --licenses > /dev/null || true
-          # 安装最新稳定版 build-tools，供 zipalign / apksigner 使用
-          LATEST_BT=$(sdkmanager --list | grep -oE 'build-tools;[0-9]+\.[0-9]+\.[0-9]+' | cut -d';' -f2 | sort -Vu | tail -n1 || true)
-          if [ -n "$LATEST_BT" ]; then
-            sdkmanager --install "build-tools;$LATEST_BT" || true
+
+          # 使用 runner 镜像自带的 cmdline-tools：setup-android@v3 会安装已下线的 tools 包并报错
+          SDKMANAGER_BIN=$(find "$SDK_ROOT/cmdline-tools" -path '*/bin/sdkmanager' -type f 2>/dev/null | sort -V | tail -n1 || true)
+          if [ -z "$SDKMANAGER_BIN" ]; then
+            SDKMANAGER_BIN=$(command -v sdkmanager || true)
           fi
-          sdkmanager --install "platform-tools" "platforms;android-${{ steps.meta.outputs.compile_sdk }}"
+          [ -n "$SDKMANAGER_BIN" ] || { echo "::error::未找到 sdkmanager"; exit 1; }
+
+          yes | "$SDKMANAGER_BIN" --sdk_root="$SDK_ROOT" --licenses > /dev/null || true
+          # 安装最新稳定版 build-tools，供 zipalign / apksigner 使用
+          LATEST_BT=$("$SDKMANAGER_BIN" --sdk_root="$SDK_ROOT" --list | grep -oE 'build-tools;[0-9]+\.[0-9]+\.[0-9]+' | cut -d';' -f2 | sort -Vu | tail -n1 || true)
+          if [ -n "$LATEST_BT" ]; then
+            "$SDKMANAGER_BIN" --sdk_root="$SDK_ROOT" --install "build-tools;$LATEST_BT" || true
+          fi
+          COMPILE_SDK="${{ steps.meta.outputs.compile_sdk }}"
+          # 新版/预览版平台可能只在 beta 渠道提供，稳定渠道失败时再试一次
+          "$SDKMANAGER_BIN" --sdk_root="$SDK_ROOT" --install "platform-tools" "platforms;android-$COMPILE_SDK" || \
+            "$SDKMANAGER_BIN" --sdk_root="$SDK_ROOT" --channel=1 --install "platforms;android-$COMPILE_SDK"
 
       - name: 编译 Release APK
         run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
