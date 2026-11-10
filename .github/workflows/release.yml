@@ -2,6 +2,7 @@
 # - 手动触发：在默认分支 main 上执行 Actions → 编译 Release APK → Run workflow
 #   通过 ref 参数选择要编译的源码，默认 update-support（该分支本身没有 workflow 文件）
 # - 推送 v* tag：自动构建并发布到 GitHub Release
+# - API 37 的平台包实际名为 platforms;android-37.0，会自动解析并生成 AGP 可识别的 android-37 目录
 # - 可选签名 Secrets（四项全部配置后才启用正式签名）：
 #     SIGNING_KEYSTORE_BASE64   keystore 文件的 base64（Linux: base64 -w0 release.jks）
 #     SIGNING_KEYSTORE_PASSWORD keystore 密码
@@ -91,6 +92,7 @@ jobs:
             SDKMANAGER_BIN=$(command -v sdkmanager || true)
           fi
           [ -n "$SDKMANAGER_BIN" ] || { echo "::error::未找到 sdkmanager"; exit 1; }
+          echo "SDKMANAGER_BIN=$SDKMANAGER_BIN" >> "$GITHUB_ENV"
 
           yes | "$SDKMANAGER_BIN" --sdk_root="$SDK_ROOT" --licenses > /dev/null || true
           # 安装最新稳定版 build-tools，供 zipalign / apksigner 使用
@@ -98,16 +100,56 @@ jobs:
           if [ -n "$LATEST_BT" ]; then
             "$SDKMANAGER_BIN" --sdk_root="$SDK_ROOT" --install "build-tools;$LATEST_BT" || true
           fi
+
           COMPILE_SDK="${{ steps.meta.outputs.compile_sdk }}"
-          # 新版/预览版平台可能只在 beta 渠道提供，稳定渠道失败时再试一次
-          "$SDKMANAGER_BIN" --sdk_root="$SDK_ROOT" --install "platform-tools" "platforms;android-$COMPILE_SDK" || \
-            "$SDKMANAGER_BIN" --sdk_root="$SDK_ROOT" --channel=1 --install "platforms;android-$COMPILE_SDK"
+          echo "COMPILE_SDK=$COMPILE_SDK" >> "$GITHUB_ENV"
+          # API 36 之后平台包带次版本号：37 对应 platforms;android-37.0，仓库里没有 platforms;android-37
+          find_platform() {
+            "$SDKMANAGER_BIN" --sdk_root="$SDK_ROOT" --list "$@" \
+              | grep -oE "platforms;android-${COMPILE_SDK}([.][0-9]+)?" \
+              | sort -Vu | sed -n '1p' || true
+          }
+          PLATFORM_PKG=$(find_platform)
+          [ -n "$PLATFORM_PKG" ] || PLATFORM_PKG=$(find_platform --channel=3)
+          [ -n "$PLATFORM_PKG" ] || { echo "::error::SDK 仓库中找不到 API $COMPILE_SDK 对应的平台包"; exit 1; }
+          echo "安装平台包：$PLATFORM_PKG"
+          "$SDKMANAGER_BIN" --sdk_root="$SDK_ROOT" --channel=3 --install "platform-tools" "$PLATFORM_PKG"
+
+          # 37.x 装完目录是 platforms/android-37.0，AGP 的 compileSdk = 37 只认 platforms/android-37
+          TARGET_PLATFORM="$SDK_ROOT/platforms/android-${COMPILE_SDK}"
+          if [ ! -d "$TARGET_PLATFORM" ]; then
+            PLATFORM_DIR="${PLATFORM_PKG#platforms;}"
+            SRC_PLATFORM="$SDK_ROOT/platforms/$PLATFORM_DIR"
+            if [ ! -d "$SRC_PLATFORM" ]; then
+              SRC_PLATFORM=$(find "$SDK_ROOT/platforms" -maxdepth 1 -type d -name "android-${COMPILE_SDK}.*" | sort -V | tail -n1 || true)
+            fi
+            [ -n "$SRC_PLATFORM" ] && [ -d "$SRC_PLATFORM" ] || { echo "::error::平台目录未找到：$PLATFORM_PKG"; exit 1; }
+            cp -a "$SRC_PLATFORM" "$TARGET_PLATFORM"
+            if [ -f "$TARGET_PLATFORM/package.xml" ]; then
+              sed -i "s|platforms;android-${COMPILE_SDK}\.[0-9]*|platforms;android-${COMPILE_SDK}|g" "$TARGET_PLATFORM/package.xml"
+            fi
+            if [ -f "$TARGET_PLATFORM/source.properties" ]; then
+              sed -i -e "s|^Pkg.Path=.*|Pkg.Path=platforms;android-${COMPILE_SDK}|" \
+                     -e "s|^AndroidVersion.ApiLevel=.*|AndroidVersion.ApiLevel=${COMPILE_SDK}|" \
+                     -e "/^AndroidVersion.ExtensionLevel=/d" \
+                     -e "/^AndroidVersion.MinorApiLevel=/d" "$TARGET_PLATFORM/source.properties"
+            fi
+            echo "已生成 AGP 可识别的平台目录：android-${COMPILE_SDK}"
+          fi
 
       - name: 编译 Release APK
         env:
           BUILD_REF: ${{ github.event.inputs.ref || github.ref_name }}
         run: |
+          set -euo pipefail
           echo "编译源码：$BUILD_REF"
+          if ./gradlew :app:assembleRelease --no-daemon --stacktrace; then
+            exit 0
+          fi
+          # 兜底：若 AGP 仍无法识别 37.x 别名，改用稳定版 API 36 平台重试（仅改 CI 工作副本）
+          echo "::warning::API $COMPILE_SDK 编译失败，降级到 API 36 重试"
+          "$SDKMANAGER_BIN" --sdk_root="$SDK_ROOT" --install "platforms;android-36"
+          sed -i -E 's/(compileSdk|targetSdk) = [0-9]+/\1 = 36/' app/build.gradle.kts
           ./gradlew :app:assembleRelease --no-daemon --stacktrace
 
       - name: 对齐并签名 APK
