@@ -7,6 +7,7 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.content.pm.PackageManager
@@ -34,29 +35,50 @@ import java.util.UUID
 /**
  * 门禁 BLE 控制层。
  *
- * 相比旧实现，这里补齐了：
- * - 可观察的状态机（连接 / 发现服务 / 读挑战 / 写密钥 / 成功 / 失败原因）
- * - 全流程 12 秒看门狗（旧实现只在连接阶段有超时，连上之后可能永远挂着）
- * - 单实例互斥（连点两次不会产生两套 GATT 连接）
- * - 所有回调的防御式处理（服务/特征缺失时不再抛 UninitializedPropertyAccessException 崩溃）
- * - 带时间戳的运行日志（供界面排查）
+ * 挑战码可能由「读特征」返回，也可能由门禁通过通知主动下发，因此两条通道都会等待：
+ * - 服务发现后先串行订阅所有通知特征（CCCD），等描述符写入回调到齐再发起读请求；
+ *   BLE 同一时刻只允许一个 GATT 操作，写完描述符立刻 readCharacteristic 会被系统以
+ *   "Device busy" 拒绝，这正是旧版本读取失败的根源。
+ * - 读请求被拒绝时短延迟重试；读回调异常或数据为空时不立即判失败，继续等待通知。
+ * - 谁先拿到有效挑战码就用谁，避免两个通道重复组包写帧。
  */
 @SuppressLint("MissingPermission")
 object UnlockRepo {
 
     private const val TAG = "UnlockRepo"
     private const val MAGIC_SERVICE = "14839ac4-7d7e-415c-9a42-167340cf2339"
+    private const val CCCD_UUID = "00002902-0000-1000-8000-00805f9b34fb"
+    // 与 BluetoothStatusCodes.SUCCESS 相同；用常量避免在低版本系统引用 API 33 的类
+    private const val GATT_STATUS_SUCCESS = 0
     private const val TIMEOUT_MS = 12_000L
+    private const val CHALLENGE_WAIT_MS = 5_000L
+    private const val READ_RETRY_DELAY_MS = 200L
+    private const val MAX_READ_RETRIES = 3
+    private const val MAX_WRITE_RETRIES = 3
+    private const val DESCRIPTOR_TIMEOUT_MS = 1_500L
     private const val MAX_LOG_LINES = 60
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val logLock = Any()
+    private val cccdUuid = UUID.fromString(CCCD_UUID)
+    private val descriptorQueue = ArrayDeque<Pair<BluetoothGattDescriptor, ByteArray>>()
 
     private var gatt: BluetoothGatt? = null
     private var readableCharacteristic: BluetoothGattCharacteristic? = null
     private var writeableCharacteristic: BluetoothGattCharacteristic? = null
     private var config: Pair<String, String> = "" to ""
     private var watchdog: Job? = null
+    private var challengeWaiter: Job? = null
+    private var readRetryJob: Job? = null
+    private var writeRetryJob: Job? = null
+    private var descriptorWatchdog: Job? = null
+    private var descriptorPending = false
+    private var challengeHandled = false
+    private var readRetries = 0
+    private var readRequestAccepted = false
+    private var lastReadStatus: Int? = null
+    private var notificationCount = 0
+    private var pendingChallenge: ByteArray? = null
     private var startedAt = 0L
 
     private val _state = MutableStateFlow<UnlockState>(UnlockState.Idle)
@@ -81,6 +103,7 @@ object UnlockRepo {
         startedAt = System.currentTimeMillis()
         readableCharacteristic = null
         writeableCharacteristic = null
+        resetChallengeFlow()
         _logs.value = emptyList()
 
         if (!DataRepo.isConfigured()) {
@@ -200,6 +223,17 @@ object UnlockRepo {
     }
 
     private fun closeGatt() {
+        challengeWaiter?.cancel()
+        challengeWaiter = null
+        readRetryJob?.cancel()
+        readRetryJob = null
+        writeRetryJob?.cancel()
+        writeRetryJob = null
+        descriptorWatchdog?.cancel()
+        descriptorWatchdog = null
+        descriptorPending = false
+        descriptorQueue.clear()
+        pendingChallenge = null
         val current = gatt ?: return
         gatt = null
         readableCharacteristic = null
@@ -261,33 +295,65 @@ object UnlockRepo {
                 return
             }
             log("发现门禁服务，共 ${service.characteristics.size} 个特征")
-            readableCharacteristic = null
-            writeableCharacteristic = null
+
+            val readableCandidates = mutableListOf<BluetoothGattCharacteristic>()
+            val writeableCandidates = mutableListOf<BluetoothGattCharacteristic>()
+            val notifyCandidates = mutableListOf<BluetoothGattCharacteristic>()
             service.characteristics.forEach { characteristic ->
                 val properties = characteristic.properties
+                log("特征 ${characteristic.uuid} prop=$properties")
                 if (properties and BluetoothGattCharacteristic.PROPERTY_READ != 0) {
-                    readableCharacteristic = characteristic
+                    readableCandidates += characteristic
                 }
-                if (properties and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) {
-                    writeableCharacteristic = characteristic
+                if (properties and (BluetoothGattCharacteristic.PROPERTY_WRITE
+                            or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0) {
+                    writeableCandidates += characteristic
                 }
-                // 说明：旧实现会在这里写 CCCD 描述符来“开启通知”，但既没有 onCharacteristicChanged
-                // 处理，也会在 Android 的单操作 GATT 队列里占住一次写操作，导致紧随其后的
-                // readCharacteristic 被拒绝。开门流程只依赖“读挑战码 + 写加密帧”，因此不再开启通知。
+                if (properties and (BluetoothGattCharacteristic.PROPERTY_NOTIFY
+                            or BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0) {
+                    notifyCandidates += characteristic
+                }
             }
 
-            val readable = readableCharacteristic
-            if (readable == null || writeableCharacteristic == null) {
-                fail(
-                    UnlockFailure.CHARACTERISTIC_MISSING,
-                    "缺少可读或可写特征"
-                )
+            // 纯通知特征不适合作主动读取；写特征优先选带 WRITE 属性、可收到写回调的
+            readableCharacteristic = readableCandidates.firstOrNull {
+                it.properties and (BluetoothGattCharacteristic.PROPERTY_NOTIFY
+                        or BluetoothGattCharacteristic.PROPERTY_INDICATE) == 0
+            } ?: readableCandidates.firstOrNull()
+            writeableCharacteristic = writeableCandidates.firstOrNull {
+                it.properties and BluetoothGattCharacteristic.PROPERTY_WRITE != 0
+            } ?: writeableCandidates.firstOrNull()
+
+            if (writeableCharacteristic == null) {
+                fail(UnlockFailure.CHARACTERISTIC_MISSING, "缺少可写特征")
                 return
             }
-            _state.value = UnlockState.Running(UnlockStep.READING)
-            if (gatt?.readCharacteristic(readable) != true) {
-                fail(UnlockFailure.READ_FAILED, "readCharacteristic 启动失败")
+            if (readableCharacteristic == null && notifyCandidates.isEmpty()) {
+                fail(UnlockFailure.CHARACTERISTIC_MISSING, "缺少可读或通知特征")
+                return
             }
+            val readableUuid = readableCharacteristic?.uuid?.toString() ?: "无"
+            log("选用读特征 $readableUuid，写特征 ${writeableCharacteristic?.uuid}，通知特征 ${notifyCandidates.size} 个")
+
+            _state.value = UnlockState.Running(UnlockStep.READING)
+            descriptorQueue.clear()
+            notifyCandidates.forEach { characteristic ->
+                val enabled = gatt?.setCharacteristicNotification(characteristic, true) == true
+                log("开启通知 ${characteristic.uuid} -> $enabled")
+                if (!enabled) return@forEach
+                val enableValue = if (characteristic.properties and
+                    BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0
+                ) {
+                    BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                } else {
+                    BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+                }
+                characteristic.descriptors
+                    .filter { it.uuid == cccdUuid }
+                    .forEach { descriptorQueue.addLast(it to enableValue) }
+            }
+            log("待订阅描述符 ${descriptorQueue.size} 个")
+            writeNextDescriptor()
         }
 
         override fun onCharacteristicRead(
@@ -298,9 +364,10 @@ object UnlockRepo {
         ) {
             if (!isActiveFlow()) return
             log("读取挑战码 status=$status size=${value.size}")
-            handleChallenge(status, value)
+            consumeChallenge(status, value, "读取")
         }
 
+        @Suppress("DEPRECATION")
         @Deprecated("Deprecated in Java")
         override fun onCharacteristicRead(
             gatt: BluetoothGatt?,
@@ -308,9 +375,43 @@ object UnlockRepo {
             status: Int
         ) {
             if (!isActiveFlow()) return
-            val value = characteristic?.value ?: return
+            val value = characteristic?.value ?: ByteArray(0)
             log("读取挑战码(旧 API) status=$status size=${value.size}")
-            handleChallenge(status, value)
+            consumeChallenge(status, value, "读取")
+        }
+
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray
+        ) {
+            if (!isActiveFlow()) return
+            notificationCount++
+            log("收到通知 size=${value.size}")
+            consumeChallenge(BluetoothGatt.GATT_SUCCESS, value, "通知")
+        }
+
+        @Suppress("DEPRECATION")
+        @Deprecated("Deprecated in Java")
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt?,
+            characteristic: BluetoothGattCharacteristic?
+        ) {
+            if (!isActiveFlow()) return
+            notificationCount++
+            val value = characteristic?.value ?: ByteArray(0)
+            log("收到通知(旧 API) size=${value.size}")
+            consumeChallenge(BluetoothGatt.GATT_SUCCESS, value, "通知")
+        }
+
+        override fun onDescriptorWrite(
+            gatt: BluetoothGatt?,
+            descriptor: BluetoothGattDescriptor?,
+            status: Int
+        ) {
+            if (!isActiveFlow()) return
+            log("描述符写入回调 status=$status")
+            handleDescriptorWrite(status)
         }
 
         override fun onCharacteristicWrite(
@@ -327,13 +428,168 @@ object UnlockRepo {
         }
     }
 
-    private fun handleChallenge(status: Int, challenge: ByteArray) {
+    private fun resetChallengeFlow() {
+        challengeWaiter?.cancel()
+        challengeWaiter = null
+        readRetryJob?.cancel()
+        readRetryJob = null
+        writeRetryJob?.cancel()
+        writeRetryJob = null
+        descriptorWatchdog?.cancel()
+        descriptorWatchdog = null
+        descriptorPending = false
+        descriptorQueue.clear()
+        challengeHandled = false
+        readRetries = 0
+        readRequestAccepted = false
+        lastReadStatus = null
+        notificationCount = 0
+        pendingChallenge = null
+    }
+
+    /** 部分 GATT 方法在 API 33 起返回 int 状态码，12 及以下返回 boolean */
+    private fun isGattSuccess(result: Any?): Boolean = when (result) {
+        is Boolean -> result
+        is Int -> result == GATT_STATUS_SUCCESS
+        else -> false
+    }
+
+    /**
+     * 逐个写 CCCD，等 onDescriptorWrite 回调到齐后再发起读请求。
+     * 描述符写完立刻 readCharacteristic 会被 GATT 队列以 Device busy 拒绝。
+     */
+    private fun writeNextDescriptor() {
+        if (!isActiveFlow() || (challengeHandled && pendingChallenge == null)) return
+        val current = gatt ?: return
+        val next = descriptorQueue.removeFirstOrNull()
+        if (next == null) {
+            val pending = pendingChallenge
+            if (pending != null) {
+                pendingChallenge = null
+                writeFrame(pending)
+            } else {
+                startReadWithRetry()
+            }
+            return
+        }
+        val (descriptor, value) = next
+        // 先标记，避免写入回调在赋值之前就到达
+        descriptorPending = true
+        val started = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                isGattSuccess(current.writeDescriptor(descriptor, value))
+            } else {
+                @Suppress("DEPRECATION")
+                descriptor.value = value
+                @Suppress("DEPRECATION")
+                isGattSuccess(current.writeDescriptor(descriptor))
+            }
+        } catch (t: Throwable) {
+            log("写入描述符异常：${t.message}")
+            false
+        }
+        log("写入描述符 ${descriptor.uuid} -> $started")
+        if (!started) {
+            // 操作没有提交就不会有回调，直接处理下一个
+            descriptorPending = false
+            writeNextDescriptor()
+            return
+        }
+        descriptorWatchdog?.cancel()
+        descriptorWatchdog = scope.launch {
+            delay(DESCRIPTOR_TIMEOUT_MS)
+            if (isActiveFlow() && descriptorPending) {
+                log("描述符写入回调超时，继续后续流程")
+                descriptorPending = false
+                writeNextDescriptor()
+            }
+        }
+    }
+
+    private fun handleDescriptorWrite(status: Int) {
+        if (!descriptorPending) return
+        descriptorPending = false
+        descriptorWatchdog?.cancel()
+        descriptorWatchdog = null
         if (status != BluetoothGatt.GATT_SUCCESS) {
-            fail(UnlockFailure.READ_FAILED, "读取回调 status=$status")
+            log("订阅通知失败 status=$status，继续读取特征")
+        }
+        writeNextDescriptor()
+    }
+
+    /** 读请求可能因 GATT 队列仍忙被拒绝，短延迟重试；仍失败则等待通知通道 */
+    private fun startReadWithRetry() {
+        if (!isActiveFlow() || challengeHandled) return
+        val current = gatt ?: return
+        val readable = readableCharacteristic
+        if (readable == null) {
+            // 挑战码完全由通知下发时，不需要读取特征
+            log("没有可读特征，仅等待通知通道下发挑战码")
+            startChallengeWaiter()
+            return
+        }
+        readRetries++
+        val result: Any? = try {
+            current.readCharacteristic(readable)
+        } catch (t: Throwable) {
+            log("readCharacteristic 异常：${t.message}")
+            false
+        }
+        val accepted = isGattSuccess(result)
+        log("读挑战码请求 #$readRetries 特征=${readable.uuid} -> $result")
+        if (!accepted && readRetries < MAX_READ_RETRIES) {
+            readRetryJob?.cancel()
+            readRetryJob = scope.launch {
+                delay(READ_RETRY_DELAY_MS)
+                startReadWithRetry()
+            }
+            return
+        }
+        readRequestAccepted = accepted
+        if (!accepted) {
+            log("readCharacteristic 连续被拒绝，等待通知通道下发挑战码")
+        }
+        startChallengeWaiter()
+    }
+
+    /** 读特征与通知都取不到有效挑战码时，给出带上下文的失败原因 */
+    private fun startChallengeWaiter() {
+        challengeWaiter?.cancel()
+        challengeWaiter = scope.launch {
+            delay(CHALLENGE_WAIT_MS)
+            if (!isActiveFlow() || challengeHandled) return@launch
+            val detail = buildString {
+                append("等待挑战码超时：读请求")
+                append(if (readRequestAccepted) "已受理" else "被拒绝 $readRetries 次")
+                lastReadStatus?.let { append("，读取回调 status=$it") }
+                append("，通知 $notificationCount 条")
+            }
+            fail(UnlockFailure.READ_FAILED, detail)
+        }
+    }
+
+    /** 读回调与通知回调统一入口，谁先拿到有效挑战码就用谁 */
+    private fun consumeChallenge(status: Int, challenge: ByteArray, source: String) {
+        if (!isActiveFlow() || challengeHandled) return
+        if (source == "读取") lastReadStatus = status
+        if (status != BluetoothGatt.GATT_SUCCESS) {
+            log("$source 返回 status=$status，继续等待通知挑战码")
             return
         }
         if (challenge.isEmpty()) {
-            fail(UnlockFailure.READ_FAILED, "门禁返回的挑战码为空")
+            log("$source 返回空数据，继续等待挑战码")
+            return
+        }
+        log("取得挑战码（$source）size=${challenge.size}")
+        challengeHandled = true
+        challengeWaiter?.cancel()
+        challengeWaiter = null
+        readRetryJob?.cancel()
+        readRetryJob = null
+        if (descriptorPending || descriptorQueue.isNotEmpty()) {
+            // 订阅还没写完，此时写特征会与描述符写操作争抢 GATT 队列
+            pendingChallenge = challenge
+            log("挑战码已收到，等待描述符订阅完成后再写入")
             return
         }
         writeFrame(challenge)
@@ -355,25 +611,53 @@ object UnlockRepo {
             return
         }
         _state.value = UnlockState.Running(UnlockStep.WRITING)
-        try {
-            val accepted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                gatt?.writeCharacteristic(
-                    writeable,
-                    frame,
-                    BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-                ) == BluetoothGatt.GATT_SUCCESS
+        val writeType = if (writeable.properties and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) {
+            BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        } else {
+            BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+        }
+        log("写入加密帧 writeType=$writeType size=${frame.size}")
+        submitFrame(writeable, frame, writeType, 1)
+    }
+
+    /**
+     * 通知通道可能比读回调更早带回挑战码，此时前一个 GATT 操作未必结束，
+     * 写入被拒绝时短延迟重试，避免直接误报「写入密钥失败」。
+     */
+    private fun submitFrame(
+        writeable: BluetoothGattCharacteristic,
+        frame: ByteArray,
+        writeType: Int,
+        attempt: Int
+    ) {
+        if (!isActiveFlow()) return
+        val accepted = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                gatt?.writeCharacteristic(writeable, frame, writeType) == BluetoothGatt.GATT_SUCCESS
             } else {
                 @Suppress("DEPRECATION")
                 writeable.value = frame
-                writeable.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                writeable.writeType = writeType
                 @Suppress("DEPRECATION")
                 gatt?.writeCharacteristic(writeable) == true
             }
-            if (!accepted) {
-                fail(UnlockFailure.WRITE_FAILED, "写入请求被系统拒绝")
-            }
         } catch (t: Throwable) {
-            fail(UnlockFailure.WRITE_FAILED, t.message)
+            fail(UnlockFailure.WRITE_FAILED, "写入异常：${t.message}")
+            return
         }
+        if (accepted) {
+            log("加密帧已提交，等待写入回调")
+            return
+        }
+        if (attempt < MAX_WRITE_RETRIES) {
+            log("写入请求第 $attempt 次被拒绝，稍后重试")
+            writeRetryJob?.cancel()
+            writeRetryJob = scope.launch {
+                delay(READ_RETRY_DELAY_MS)
+                submitFrame(writeable, frame, writeType, attempt + 1)
+            }
+            return
+        }
+        fail(UnlockFailure.WRITE_FAILED, "写入请求被系统拒绝（已重试 $attempt 次）")
     }
 }
