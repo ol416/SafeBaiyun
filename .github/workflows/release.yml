@@ -8,7 +8,8 @@
 #     SIGNING_KEYSTORE_PASSWORD keystore 密码
 #     SIGNING_KEY_ALIAS         密钥别名
 #     SIGNING_KEY_PASSWORD      密钥密码
-# - 未配置时使用一次性 CI 密钥签名，APK 可直接安装，但每次签名不同，不能覆盖升级安装
+# - 未配置或签名 Secrets 无效（base64 损坏 / 密码或别名不匹配）时使用一次性 CI 密钥，
+#   APK 可直接安装，但每次签名不同，不能覆盖升级安装；相关情况会在日志中打印警告
 
 name: 编译 Release APK
 
@@ -168,35 +169,47 @@ jobs:
 
           mkdir -p ci-out
           KEYSTORE="$RUNNER_TEMP/signing-keystore.p12"
+          CI_KEYSTORE="$RUNNER_TEMP/ci-keystore.p12"
           ALIGNED="$RUNNER_TEMP/aligned.apk"
-          rm -f "$KEYSTORE" "$ALIGNED"
+          rm -f "$KEYSTORE" "$CI_KEYSTORE" "$ALIGNED"
+          "$BT_DIR/zipalign" -p -f 4 "$APK_SRC" "$ALIGNED"
 
+          # 一次性 CI 密钥始终生成，作为正式签名失败时的兜底
+          keytool -genkeypair -alias safebaiyun-ci -keyalg RSA -keysize 2048 -validity 10000 \
+            -storetype PKCS12 -keystore "$CI_KEYSTORE" -storepass safebaiyun-ci \
+            -keypass safebaiyun-ci -dname "CN=SafeBaiyun CI, OU=CI, O=SafeBaiyun, L=Guangzhou, ST=Guangdong, C=CN"
+
+          MODE=ci
+          FINAL_APK="ci-out/SafeBaiyun-${VERSION_NAME}-release-ci-signed.apk"
           if [ -n "$SIGNING_KEYSTORE_BASE64" ] && [ -n "$SIGNING_KEYSTORE_PASSWORD" ] && [ -n "$SIGNING_KEY_ALIAS" ] && [ -n "$SIGNING_KEY_PASSWORD" ]; then
-            MODE=release
-            ALIAS="$SIGNING_KEY_ALIAS"
-            STORE_PASS="$SIGNING_KEYSTORE_PASSWORD"
-            KEY_PASS="$SIGNING_KEY_PASSWORD"
-            printf '%s' "$SIGNING_KEYSTORE_BASE64" | base64 -d > "$KEYSTORE"
-            KS_TYPE_ARGS=()
-            FINAL_APK="ci-out/SafeBaiyun-${VERSION_NAME}-release.apk"
-          else
-            MODE=ci
-            ALIAS=safebaiyun-ci
-            STORE_PASS=safebaiyun-ci
-            KEY_PASS=safebaiyun-ci
-            keytool -genkeypair -alias "$ALIAS" -keyalg RSA -keysize 2048 -validity 10000 \
-              -storetype PKCS12 -keystore "$KEYSTORE" -storepass "$STORE_PASS" \
-              -keypass "$KEY_PASS" -dname "CN=SafeBaiyun CI, OU=CI, O=SafeBaiyun, L=Guangzhou, ST=Guangdong, C=CN"
-            KS_TYPE_ARGS=(--ks-type PKCS12)
-            FINAL_APK="ci-out/SafeBaiyun-${VERSION_NAME}-release-ci-signed.apk"
+            # 去掉 Secret 里常见的换行/空格后再解码，避免 PKCS12KeyStore EOFException
+            printf '%s' "$SIGNING_KEYSTORE_BASE64" | tr -d '[:space:]' | base64 -d > "$KEYSTORE" 2>/dev/null || true
+            if [ ! -s "$KEYSTORE" ] || ! keytool -list -keystore "$KEYSTORE" -storepass "$SIGNING_KEYSTORE_PASSWORD" > /dev/null 2>&1; then
+              echo "::warning::SIGNING_KEYSTORE_BASE64 解码后不是有效密钥库（空文件 / 被截断 / 库密码不匹配），改用一次性 CI 密钥"
+            else
+              export APKSIGNER_KS_PASS="$SIGNING_KEYSTORE_PASSWORD" APKSIGNER_KEY_PASS="$SIGNING_KEY_PASSWORD"
+              if "$BT_DIR/apksigner" sign \
+                    --ks "$KEYSTORE" --ks-key-alias "$SIGNING_KEY_ALIAS" \
+                    --ks-pass env:APKSIGNER_KS_PASS --key-pass env:APKSIGNER_KEY_PASS \
+                    --out "$FINAL_APK" "$ALIGNED"; then
+                MODE=release
+                RELEASE_APK="ci-out/SafeBaiyun-${VERSION_NAME}-release.apk"
+                mv "$FINAL_APK" "$RELEASE_APK"
+                FINAL_APK="$RELEASE_APK"
+              else
+                echo "::warning::正式密钥签名失败（别名 / 密钥口令 / 密钥库类型不匹配），改用一次性 CI 密钥"
+                rm -f "$FINAL_APK"
+              fi
+            fi
           fi
 
-          export APKSIGNER_KS_PASS="$STORE_PASS" APKSIGNER_KEY_PASS="$KEY_PASS"
-          "$BT_DIR/zipalign" -p -f 4 "$APK_SRC" "$ALIGNED"
-          "$BT_DIR/apksigner" sign "${KS_TYPE_ARGS[@]}" \
-            --ks "$KEYSTORE" --ks-key-alias "$ALIAS" \
-            --ks-pass env:APKSIGNER_KS_PASS --key-pass env:APKSIGNER_KEY_PASS \
-            --out "$FINAL_APK" "$ALIGNED"
+          if [ "$MODE" = ci ]; then
+            export APKSIGNER_KS_PASS=safebaiyun-ci APKSIGNER_KEY_PASS=safebaiyun-ci
+            "$BT_DIR/apksigner" sign --ks-type PKCS12 \
+              --ks "$CI_KEYSTORE" --ks-key-alias safebaiyun-ci \
+              --ks-pass env:APKSIGNER_KS_PASS --key-pass env:APKSIGNER_KEY_PASS \
+              --out "$FINAL_APK" "$ALIGNED"
+          fi
           "$BT_DIR/apksigner" verify --verbose "$FINAL_APK"
           ls -lh "$FINAL_APK"
 
@@ -209,7 +222,7 @@ jobs:
               echo "- 签名：仓库 Secrets 中的正式密钥"
             else
               echo "- 签名：一次性 CI 密钥（可直接安装，但每次构建签名不同，无法覆盖升级）"
-              echo "- 需要正式签名请配置 SIGNING_KEYSTORE_BASE64 等 4 个 Secrets（见本 workflow 顶部注释）"
+              echo "- 若已配置 SIGNING_KEYSTORE_*，请查看本步骤日志中的警告以修正签名 Secrets"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
