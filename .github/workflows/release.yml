@@ -60,15 +60,33 @@ jobs:
 
       - name: 读取项目构建参数
         id: meta
+        env:
+          INPUT_RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          VERSION_NAME=$(sed -n 's/.*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n1)
+          
+          # 1. 优先使用手动输入且非空的 release_tag（去掉开头的 v，如 v1.1.2 变成 1.1.2）
+          # 2. 其次如果是 tag 触发（如 push 触发的 v1.1.2），使用 ref_name
+          # 3. 如果都没有，则从 build.gradle.kts 中读取 versionName
+          VERSION_NAME=""
+          if [ -n "${INPUT_RELEASE_TAG:-}" ]; then
+            VERSION_NAME="${INPUT_RELEASE_TAG#v}"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION_NAME="${REF_NAME#v}"
+          else
+            VERSION_NAME=$(sed -n 's/.*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n1)
+          fi
+
           COMPILE_SDK=$(sed -n 's/.*compileSdk[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' app/build.gradle.kts | head -n1)
+          
           [ -n "$VERSION_NAME" ] || { echo "::error::无法解析 versionName"; exit 1; }
           [ -n "$COMPILE_SDK" ] || { echo "::error::无法解析 compileSdk"; exit 1; }
+          
           echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
-          echo "compile_sdk=$COMPILE_SDK" >> "$GITHUB_OUTPUT"
+          echo "compile_sdk=$COMPILE_SDK" >> "$GITHUB_ENV"
           echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "成功确定版本号: $VERSION_NAME"
 
       - name: 适配 CI 环境
         run: |
