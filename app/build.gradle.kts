@@ -1,17 +1,19 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 plugins {
     alias(libs.plugins.androidApplication)
     alias(libs.plugins.jetbrainsKotlinAndroid)
-    id("kotlinx-serialization")
+    alias(libs.plugins.composeCompiler)
 }
 
 android {
     namespace = "cn.huacheng.safebaiyun"
-    compileSdk = 34
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "cn.huacheng.safebaiyun"
         minSdk = 21
-        targetSdk = 34
+        targetSdk = 37
         versionCode = 2
         versionName = "1.1"
 
@@ -35,19 +37,20 @@ android {
         sourceCompatibility = JavaVersion.VERSION_1_8
         targetCompatibility = JavaVersion.VERSION_1_8
     }
-    kotlinOptions {
-        jvmTarget = "1.8"
-    }
     buildFeatures {
         compose = true
-    }
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.9"
     }
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+    }
+}
+
+// Kotlin 2.0+ 推荐写法：kotlinOptions 已弃用，编译选项统一走 compilerOptions
+kotlin {
+    compilerOptions {
+        jvmTarget = JvmTarget.JVM_1_8
     }
 }
 
@@ -61,7 +64,15 @@ dependencies {
     implementation(libs.androidx.ui.graphics)
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
-    implementation(libs.kotlinx.serialization.json)
+    // 源码直接使用 foundation（layout.* / LazyColumn / background / isSystemInDarkTheme），
+    // 不依赖 material3 的传递依赖，避免 material3 调整内部依赖时静默断链
+    implementation(libs.androidx.foundation)
+    // 源码直接使用 animation（slideIn / slideOut），同样显式声明
+    implementation(libs.androidx.animation)
+    // Icons.Filled.* / Icons.AutoMirrored.*：Material3 1.3.0 起已移除对 material-icons-core 的依赖
+    implementation(libs.androidx.material.icons.core)
+    // GlobalScope / launch / Dispatchers.Main / MutableStateFlow 的直接来源
+    implementation(libs.kotlinx.coroutines.android)
     implementation(libs.glance)
     implementation(libs.glance.material)
     implementation(libs.navigation)

@@ -6,10 +6,19 @@
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="com.android.launcher.permission.INSTALL_SHORTCUT" />
 
+    <!-- 只按 MAC 直连，不做扫描；没有蓝牙的设备也能安装（用于查看配置/说明） -->
+    <uses-feature
+        android:name="android.hardware.bluetooth"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.bluetooth_le"
+        android:required="false" />
+
     <application
         android:name="cn.huacheng.safebaiyun.BaiYunApplication"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
+        android:enableOnBackInvokedCallback="true"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
@@ -21,24 +30,29 @@
         <activity
             android:name="cn.huacheng.safebaiyun.MainActivity"
             android:exported="true"
-            android:theme="@style/Theme.SafeBaiyun">
+            android:theme="@style/Theme.SafeBaiyun"
+            android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
 
-
+        <!-- 快捷方式 / 小部件入口：半透明结果卡，不进入最近任务 -->
         <activity
             android:name=".ShortcutActivity"
-            android:exported="true" />
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.SafeBaiyun.Transparent" />
 
         <activity-alias
             android:name="cn.huacheng.safebaiyun.QuickUnlockActivity"
             android:exported="true"
             android:icon="@mipmap/ic_launcher"
             android:label="@string/unlock_door"
-            android:targetActivity=".ShortcutActivity">
+            android:targetActivity=".ShortcutActivity"
+            android:theme="@style/Theme.SafeBaiyun.Transparent">
             <intent-filter>
                 <action android:name="android.intent.action.CREATE_SHORTCUT" />
                 <category android:name="android.intent.category.LAUNCHER" />

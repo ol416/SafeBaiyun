@@ -1,48 +1,81 @@
 package cn.huacheng.safebaiyun
 
-import android.Manifest
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.os.Build
 import android.os.Bundle
-import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.size
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
+import cn.huacheng.safebaiyun.compose.ShortcutResultView
+import cn.huacheng.safebaiyun.compose.openBluetoothSettings
+import cn.huacheng.safebaiyun.theme.SafeBaiyunTheme
 import cn.huacheng.safebaiyun.unlock.DataRepo
 import cn.huacheng.safebaiyun.unlock.UnlockRepo
-import cn.huacheng.safebaiyun.util.showToast
+import cn.huacheng.safebaiyun.unlock.UnlockState
+import cn.huacheng.safebaiyun.util.DeviceConfig
+import kotlinx.coroutines.delay
 
 /**
+ * 快捷方式 / 桌面小部件的统一入口。
  *
- *@description:
- *@author: guangzhou
- *@create: 2024-05-06
+ * 旧实现先铺一屏全屏转圈，再立刻 finish，只留一个 Toast；
+ * 现在改为半透明窗口上的结果卡：成功自动关闭，失败保留原因与重试入口。
  */
 class ShortcutActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        Log.d("largetWidget","onCreate")
-        setContent {
-            Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(modifier = Modifier.size(48.dp))
-            }
-        }
         if (intent.action == Intent.ACTION_CREATE_SHORTCUT) {
             createShortcut()
-        } else {
-            unlock()
+            return
         }
+
+        setFinishOnTouchOutside(true)
+        // 清掉上一次的旧结果，避免一进来就显示上一轮的成功/失败
+        UnlockRepo.reset()
+
+        setContent {
+            SafeBaiyunTheme {
+                val context = LocalContext.current
+                val state by UnlockRepo.state.collectAsState()
+                val config = remember { DataRepo.readData() }
+
+                ShortcutResultView(
+                    state = state,
+                    macLabel = DeviceConfig.maskMac(config.first),
+                    onCancel = {
+                        UnlockRepo.cancel()
+                        finish()
+                    },
+                    onRetry = { UnlockRepo.unlock() },
+                    onClose = { finish() },
+                    onOpenConfig = { openMain() },
+                    onOpenPermission = { openMain() },
+                    onOpenBluetooth = { openBluetoothSettings(context) }
+                )
+
+                LaunchedEffect(state) {
+                    if (state is UnlockState.Success) {
+                        delay(1400)
+                        finish()
+                    }
+                }
+            }
+        }
+
+        UnlockRepo.unlock()
+    }
+
+    private fun openMain() {
+        startActivity(
+            Intent(this, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+        finish()
     }
 
     private fun createShortcut() {
@@ -52,24 +85,6 @@ class ShortcutActivity : ComponentActivity() {
         intent.putExtra(Intent.EXTRA_SHORTCUT_ICON_RESOURCE, icon)
         intent.putExtra(Intent.EXTRA_SHORTCUT_INTENT, Intent(this, ShortcutActivity::class.java))
         setResult(RESULT_OK, intent)
-        finish()
-    }
-
-    private fun unlock() {
-        val hasPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
-        } else {
-            true
-        }
-
-        if (!hasPermission || DataRepo.readData().first.isEmpty()) {
-            showToast("请先初始化")
-            startActivity(Intent(this,MainActivity::class.java))
-            finish()
-            return
-        }
-        showToast("开始解锁门禁")
-        UnlockRepo.unlock()
         finish()
     }
 }

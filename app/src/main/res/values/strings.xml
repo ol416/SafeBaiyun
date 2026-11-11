@@ -2,4 +2,6 @@
     <string name="app_name">白云通</string>
     <string name="unlock_door">门禁解锁</string>
     <string name="request_permission">申请权限</string>
+    <string name="widget_large_description">白云通 · 大尺寸（2×2），显示最近一次开门结果</string>
+    <string name="widget_medium_description">白云通 · 中尺寸（2×1），点击快速开门</string>
 </resources>

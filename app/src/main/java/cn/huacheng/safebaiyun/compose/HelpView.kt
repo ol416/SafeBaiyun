@@ -1,104 +1,185 @@
 package cn.huacheng.safebaiyun.compose
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material3.Button
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
-import androidx.navigation.compose.rememberNavController
 import cn.huacheng.safebaiyun.widget.WidgetHelper
 
 /**
- *
- *@description:
- *@author: guangzhou
- *@create: 2024-05-10
+ * 使用说明：按“首次配置 / 状态含义 / 快捷入口 / 常见问题”分卡片展示，
+ * 长文本不再堆成一堵墙。
  */
 @Composable
 fun HelpView(navController: NavController) {
-    Column {
-        HelperTopBar(navController)
-
-        LazyColumn(modifier = Modifier.padding(12.dp)) {
-            item { AppHelper() }
-            item { ShortcutHelper() }
-            item { WidgetHelper() }
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .widthIn(max = 600.dp)
+        ) {
+            HelperTopBar(navController)
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .navigationBarsPadding(),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                    start = 16.dp,
+                    end = 16.dp,
+                    top = 12.dp,
+                    bottom = 24.dp
+                ),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                item { AboutCard() }
+                item { SetupCard() }
+                item { StatusCard() }
+                item { EntryCard() }
+                item { FaqCard() }
+            }
         }
     }
 }
 
 @Composable
-fun AppHelper() {
-    Text(text = "关于软件", style = MaterialTheme.typography.titleLarge)
-    Text(text = "本软件是广州市白云区蓝牙门禁的离线版本，只需要门禁的mac地址以及加密key即可开门，无需网络。")
-    Text(
-        text = "使用方法",
-        modifier = Modifier.padding(top = 8.dp),
-        style = MaterialTheme.typography.titleLarge
-    )
-    Text(text = "1. 提取MAC地址及加密密钥")
-    Text(text = "1.1 Root方式提取")
-    Text(text = "有 root 的Android 手机可以直接前往 /data/data/com.huacheng.baiyunuser/databases/目录 找到数据库文件 (32位 hash).db")
-    Text(text = "1.2 无Root方式提取")
-    Text(text = "使用MIUI的备份功能提取数据文件，前往 设置->我的设备->备份与恢复->手机备份 只选中平安回家这个软件进行备份即可，备份完成之后用 MT 管理器打开 /sdcard/MIUI/backup/AllBackup/时间/平安回家(com.huacheng.baiyunuser.bak)压缩包 然后在压缩包中找到apps/com.huacheng.baiyunuser/db/(32位 hash).db将其解压出来。")
-    Text(text = "1.3 查看DB文件")
-    Text(text = "随便找个支持查看 sqlite 数据库的软件，打开.db文件，查询t_device表， 其中 MAC_NUM 是 mac 地址 PRODUCT_KEY 就是加密key")
-    Text(text = "2. 点击软件右上角编辑按钮，将Mac地址及Key填进去，保存")
-    Text(text = "3. 开门", fontWeight = FontWeight.Medium)
-}
-
-
-@Composable
-private fun ShortcutHelper() {
-    Text(
-        "快捷方式",
-        modifier = Modifier.padding(top = 8.dp),
-        style = MaterialTheme.typography.titleLarge
-    )
-    Text(text = "快捷方式在桌面上跟普通App长的差不多，使用快捷方式开门只需点击图标即可。在大部分国产系统如OPPO,MIUI上需要手动授予“创建桌面快捷方式”权限。")
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 8.dp), horizontalArrangement = Arrangement.SpaceEvenly
-    ) {
-        Button(onClick = {
-            WidgetHelper.createShortcut()
-        }) {
-            Text(text = "创建快捷方式")
-        }
-        Button(onClick = {
-            WidgetHelper.requestPermission()
-        }) {
-            Text(text = "授予权限")
+private fun SectionCard(title: String, content: @Composable () -> Unit) {
+    OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            content()
         }
     }
 }
 
-
 @Composable
-private fun WidgetHelper() {
+private fun BodyText(text: String) {
     Text(
-        text = "桌面小部件",
-        modifier = Modifier.padding(top = 8.dp),
-        style = MaterialTheme.typography.titleLarge
+        text = text,
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
     )
-    Text(text = "桌面小部件类似于快捷方式，但是可以有更多的样式。本App提供了大中三种样式。可以在桌面长按空白处，然后选择“添加小部件”")
-    Text(text = "在低于Android12的手机上小部件不会正常显示，建议不要使用。")
-
 }
 
-@Preview
 @Composable
-private fun WidgetPreview() {
-    HelpView(navController = rememberNavController())
+private fun AboutCard() {
+    SectionCard(title = "关于白云通") {
+        BodyText("白云通是广州市白云区蓝牙门禁的离线控制端：只需要门禁的 MAC 地址与加密 Key，不依赖网络即可开门。")
+        BodyText("配置只保存在本机（SharedPreferences），已排除系统云备份，不会上传到任何服务器。")
+    }
+}
+
+@Composable
+private fun SetupCard() {
+    SectionCard(title = "首次配置") {
+        BodyText("1. 提取 MAC 与 Key")
+        BodyText("Root 手机：/data/data/com.huacheng.baiyunuser/databases/ 下的 (32 位 hash).db")
+        BodyText("无 Root：用 MIUI 备份「平安回家」，解压备份包中的 apps/com.huacheng.baiyunuser/db/(32 位 hash).db")
+        BodyText("2. 用任意 SQLite 查看器打开 .db，查询 t_device 表：MAC_NUM 是 MAC，PRODUCT_KEY 是 Key")
+        BodyText("3. 回到主页点右上角编辑，粘贴 MAC 与 Key 并保存")
+        BodyText("4. 点击「解锁」即可开门，也可以创建快捷方式或添加桌面小部件")
+    }
+}
+
+@Composable
+private fun StatusCard() {
+    SectionCard(title = "状态说明") {
+        BodyText("主页会显示蓝牙、权限、设备三项状态，以及开门流程的四个步骤：")
+        StatusRow("连接", "正在建立 BLE 连接")
+        StatusRow("发现服务", "校验门禁专用服务与读写特征")
+        StatusRow("读取挑战", "读取门禁下发的随机数")
+        StatusRow("写入密钥", "加密后写入开门指令")
+        BodyText("成功会显示用时并记录“上次开门”；失败会给出具体原因与下一步操作（开蓝牙 / 授权 / 去配置 / 重试）。")
+    }
+}
+
+@Composable
+private fun StatusRow(label: String, detail: String) {
+    Row(verticalAlignment = Alignment.Top) {
+        Text(
+            text = label,
+            modifier = Modifier.width(72.dp),
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.primary
+        )
+        Text(
+            text = detail,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
+private fun EntryCard() {
+    SectionCard(title = "快捷方式与桌面小部件") {
+        BodyText("快捷方式点击图标即可开门；部分国产系统（OPPO / MIUI 等）需要手动授予“创建桌面快捷方式”权限。")
+        BodyText("桌面小部件有大（2×2）与中（2×1）两种样式，会显示最近一次开门结果。Android 12 以下的小部件显示可能不正常。")
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            OutlinedButton(
+                onClick = { WidgetHelper.createShortcut() },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("创建快捷方式", maxLines = 1)
+            }
+            OutlinedButton(
+                onClick = { WidgetHelper.requestPinWidget() },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("添加小部件", maxLines = 1)
+            }
+        }
+        Row(modifier = Modifier.fillMaxWidth()) {
+            OutlinedButton(
+                onClick = { WidgetHelper.requestPermission() },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("打开应用权限设置")
+            }
+        }
+    }
+}
+
+@Composable
+private fun FaqCard() {
+    SectionCard(title = "常见问题") {
+        BodyText("· 提示“连接失败 / 超时”：靠近门禁、确认门禁已上电，再重试。")
+        BodyText("· 提示“没有找到门禁服务 / 特征不完整”：该设备不是受支持的门禁，或固件不匹配。")
+        BodyText("· 提示“写入密钥失败”：多半是 PRODUCT_KEY 填错，请重新核对官方 App 中的值。")
+        BodyText("· 蓝牙已开启仍提示未授权：Android 12 及以上需要授予「附近的设备」权限。")
+    }
 }
