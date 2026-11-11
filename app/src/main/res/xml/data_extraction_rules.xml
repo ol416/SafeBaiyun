@@ -1,16 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  门禁 MAC / Key 属于敏感凭据：不进入云备份，也不参与换机迁移。
+  门禁 MAC / Key 属于敏感凭据；开门日志含设备名称与逐步运行记录。
+  两者都不进入云备份，也不参与换机迁移。
 -->
 <data-extraction-rules>
     <cloud-backup>
         <exclude
             domain="sharedpref"
             path="data.xml" />
+        <exclude
+            domain="file"
+            path="unlock_logs" />
     </cloud-backup>
     <device-transfer>
         <exclude
             domain="sharedpref"
             path="data.xml" />
+        <exclude
+            domain="file"
+            path="unlock_logs" />
     </device-transfer>
 </data-extraction-rules>

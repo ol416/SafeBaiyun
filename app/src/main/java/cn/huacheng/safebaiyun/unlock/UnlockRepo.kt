@@ -80,6 +80,11 @@ object UnlockRepo {
     private var notificationCount = 0
     private var pendingChallenge: ByteArray? = null
     private var startedAt = 0L
+    // 当前日志会话 id（同时用作 LogRepo 的文件名）；0 表示没有活跃会话
+    private var sessionId = 0L
+    private var lastSessionId = 0L
+    // 系统 BLE 名称：按 MAC 直连、不扫描时不保证能取到，取不到由界面回退到脱敏 MAC
+    private var deviceName: String? = null
 
     private val _state = MutableStateFlow<UnlockState>(UnlockState.Idle)
     val state: StateFlow<UnlockState> = _state.asStateFlow()
@@ -105,6 +110,11 @@ object UnlockRepo {
         writeableCharacteristic = null
         resetChallengeFlow()
         _logs.value = emptyList()
+        deviceName = null
+        // 单调递增，防止两次开门落在同一毫秒时共用同一个日志文件
+        sessionId = maxOf(startedAt, lastSessionId + 1)
+        lastSessionId = sessionId
+        LogRepo.begin(sessionId, startedAt, DeviceConfig.maskMac(config.first), null)
 
         if (!DataRepo.isConfigured()) {
             fail(UnlockFailure.NO_CONFIG, persist = false)
@@ -138,6 +148,16 @@ object UnlockRepo {
 
         try {
             val device = adapter.getRemoteDevice(config.first)
+            deviceName = readDeviceName(device)
+            LogRepo.updateDeviceName(sessionId, deviceName)
+            // 名称本身不写进 logcat / 运行日志，只记录是否取到
+            log(
+                if (deviceName == null) {
+                    "未获取到门禁蓝牙名称，日志中显示脱敏 MAC"
+                } else {
+                    "已获取门禁蓝牙名称"
+                }
+            )
             gatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)
             } else {
@@ -161,6 +181,7 @@ object UnlockRepo {
         watchdog = null
         closeGatt()
         _state.value = UnlockState.Idle
+        finishSession(LogOutcome.CANCELLED, System.currentTimeMillis())
     }
 
     /**
@@ -196,6 +217,7 @@ object UnlockRepo {
         DataRepo.saveLastResult(LastUnlock(success = true, at = now))
         _state.value = UnlockState.Success(elapsed, now)
         log("开门成功，用时 ${elapsed}ms")
+        finishSession(LogOutcome.SUCCESS, now, elapsedMs = elapsed)
         WidgetRefresher.refresh()
     }
 
@@ -209,6 +231,7 @@ object UnlockRepo {
         }
         _state.value = UnlockState.Failed(reason, detail, now)
         log("开门失败：${reason.name}${detail?.let { "（$it）" } ?: ""}")
+        finishSession(LogOutcome.FAILED, now, reason, detail)
         if (persist) {
             WidgetRefresher.refresh()
         }
@@ -217,10 +240,34 @@ object UnlockRepo {
     private fun log(message: String) {
         Log.d(TAG, message)
         val timestamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
+        val line = "$timestamp  $message"
         synchronized(logLock) {
-            _logs.value = (_logs.value + "$timestamp  $message").takeLast(MAX_LOG_LINES)
+            _logs.value = (_logs.value + line).takeLast(MAX_LOG_LINES)
         }
+        LogRepo.append(sessionId, line)
     }
+
+    /** 结束当前日志会话；前置失败、取消、超时同样要留下记录。 */
+    private fun finishSession(
+        outcome: LogOutcome,
+        at: Long,
+        reason: UnlockFailure? = null,
+        detail: String? = null,
+        elapsedMs: Long? = null
+    ) {
+        if (sessionId <= 0L) return
+        val elapsed = elapsedMs ?: (at - startedAt).coerceAtLeast(0L)
+        LogRepo.finish(sessionId, outcome, at, elapsed, reason, detail)
+        sessionId = 0L
+    }
+
+    /**
+     * 读取系统 BLE 名称。项目按 MAC 直连、不做扫描，蓝牙栈缓存里通常没有广播名，
+     * 返回 null 是预期情况；同时兜住权限缺失时的 SecurityException。
+     */
+    private fun readDeviceName(device: BluetoothDevice?): String? = runCatching {
+        device?.name?.trim()?.takeIf { it.isNotEmpty() }
+    }.getOrNull()
 
     private fun closeGatt() {
         challengeWaiter?.cancel()
@@ -270,6 +317,15 @@ object UnlockRepo {
             when {
                 status == BluetoothGatt.GATT_SUCCESS && newState == BluetoothGatt.STATE_CONNECTED -> {
                     _state.value = UnlockState.Running(UnlockStep.DISCOVERING)
+                    // 连接前蓝牙栈缓存里往往还没有名字，连上后再补读一次
+                    if (deviceName.isNullOrBlank()) {
+                        val connectedName = readDeviceName(gatt?.device)
+                        if (connectedName != null) {
+                            deviceName = connectedName
+                            LogRepo.updateDeviceName(sessionId, connectedName)
+                            log("连接后补读到门禁蓝牙名称")
+                        }
+                    }
                     val started = gatt?.discoverServices() == true
                     log(if (started) "已连接，开始发现服务" else "discoverServices 启动失败")
                     if (!started) {

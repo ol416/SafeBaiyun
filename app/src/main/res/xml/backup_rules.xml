@@ -1,10 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  门禁 MAC / Key 属于敏感凭据：不进入系统云备份，也不参与换机迁移。
-  需要换机时从官方 App 重新提取即可。
+  门禁 MAC / Key 属于敏感凭据；开门日志含设备名称与逐步运行记录。
+  两者都不进入系统云备份，也不参与换机迁移。
+  需要换机时从官方 App 重新提取 MAC / Key 即可。
 -->
 <full-backup-content>
     <exclude
         domain="sharedpref"
         path="data.xml" />
+    <exclude
+        domain="file"
+        path="unlock_logs" />
 </full-backup-content>

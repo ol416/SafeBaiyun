@@ -14,6 +14,7 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -38,6 +39,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -50,6 +52,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -76,6 +79,9 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.navigation.NavHostController
 import cn.huacheng.safebaiyun.unlock.DataRepo
 import cn.huacheng.safebaiyun.unlock.LastUnlock
+import cn.huacheng.safebaiyun.unlock.LogOutcome
+import cn.huacheng.safebaiyun.unlock.LogRepo
+import cn.huacheng.safebaiyun.unlock.LogSession
 import cn.huacheng.safebaiyun.unlock.UnlockFailure
 import cn.huacheng.safebaiyun.unlock.UnlockRepo
 import cn.huacheng.safebaiyun.unlock.UnlockState
@@ -104,7 +110,7 @@ fun MainView(navController: NavHostController) {
     var showEditDialog by remember { mutableStateOf(false) }
 
     val state by UnlockRepo.state.collectAsState()
-    val logs by UnlockRepo.logs.collectAsState()
+    val sessions by LogRepo.sessions.collectAsState()
 
     val config = remember(configVersion) { DataRepo.readData() }
     val configured = config.first.isNotBlank() && config.second.isNotBlank()
@@ -207,7 +213,7 @@ fun MainView(navController: NavHostController) {
                     LastResultCard(lastResult)
                 }
                 QuickActions()
-                LogPanel(logs)
+                LogPanel(sessions)
                 Text(
                     text = "离线门禁 · 数据仅保存在本机",
                     modifier = Modifier
@@ -674,9 +680,23 @@ private fun QuickActions() {
 }
 
 @Composable
-private fun LogPanel(logs: List<String>) {
+private fun LogPanel(sessions: List<LogSession>) {
     var expanded by remember { mutableStateOf(false) }
+    var selectedId by remember { mutableStateOf<Long?>(null) }
+    var showClearConfirm by remember { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
+
+    // selectedId 为 null 表示跟随最新会话；一旦有新开门就自动跳回实时日志
+    val latestId = sessions.firstOrNull()?.id
+    LaunchedEffect(latestId) { selectedId = null }
+
+    val selected = sessions.find { it.id == selectedId } ?: sessions.firstOrNull()
+    val accent = if (selected != null) {
+        outcomeColor(selected.outcome)
+    } else {
+        MaterialTheme.colorScheme.primary
+    }
+
     OutlinedCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.fillMaxWidth()) {
             Row(
@@ -692,7 +712,7 @@ private fun LogPanel(logs: List<String>) {
                 )
                 Spacer(Modifier.weight(1f))
                 Text(
-                    text = "${logs.size} 条",
+                    text = "${sessions.size} 次",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -713,41 +733,202 @@ private fun LogPanel(logs: List<String>) {
                         .padding(horizontal = 16.dp)
                         .padding(bottom = 8.dp)
                 ) {
-                    if (logs.isEmpty()) {
+                    if (sessions.isEmpty()) {
                         Text(
-                            text = "暂无日志。开门后会在这里显示每一步的时间与结果。",
+                            text = "暂无日志。开门后会在这里显示每一步的时间与结果，"
+                                + "并保留最近 20 次记录供回看。",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     } else {
-                        logs.forEach { line ->
+                        val current = selected ?: sessions.first()
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            sessions.forEach { session ->
+                                SessionChip(
+                                    label = sessionChipLabel(session),
+                                    selected = session.id == current.id,
+                                    accent = outcomeColor(session.outcome),
+                                    onClick = { selectedId = session.id }
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        SessionSummary(current, accent)
+                        Spacer(Modifier.height(8.dp))
+                        if (current.lines.isEmpty()) {
                             Text(
-                                text = line,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 11.sp,
-                                lineHeight = 16.sp,
+                                text = "本次没有产生运行日志。",
+                                style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                        }
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End
-                    ) {
-                        TextButton(
-                            enabled = logs.isNotEmpty(),
-                            onClick = {
-                                clipboard.setText(AnnotatedString(logs.joinToString("\n")))
-                                showToast("日志已复制")
+                        } else {
+                            current.lines.forEach { line ->
+                                Text(
+                                    text = line,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 11.sp,
+                                    lineHeight = 16.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
                             }
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End
                         ) {
-                            Text("复制")
+                            TextButton(
+                                onClick = {
+                                    clipboard.setText(AnnotatedString(sessionText(current)))
+                                    showToast("本次日志已复制")
+                                }
+                            ) {
+                                Text("复制本次")
+                            }
+                            TextButton(onClick = { showClearConfirm = true }) {
+                                Text("清空历史")
+                            }
                         }
                     }
                 }
             }
         }
     }
+
+    if (showClearConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearConfirm = false },
+            title = { Text("清空历史日志") },
+            text = {
+                Text("将删除本机保存的全部开门日志，进行中的记录会保留。此操作不可撤销。")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    LogRepo.clear()
+                    selectedId = null
+                    showClearConfirm = false
+                    showToast("历史日志已清空")
+                }) {
+                    Text("清空")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearConfirm = false }) { Text("取消") }
+            }
+        )
+    }
+}
+
+@Composable
+private fun SessionChip(
+    label: String,
+    selected: Boolean,
+    accent: Color,
+    onClick: () -> Unit
+) {
+    val container = if (selected) {
+        accent.copy(alpha = 0.18f)
+    } else {
+        MaterialTheme.colorScheme.surfaceVariant
+    }
+    Text(
+        text = label,
+        modifier = Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(container)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        style = MaterialTheme.typography.labelMedium,
+        color = if (selected) accent else MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = 1
+    )
+}
+
+@Composable
+private fun SessionSummary(session: LogSession, accent: Color) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(accent)
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = "${outcomeLabel(session)} · ${formatClockTime(session.startedAt)}"
+                    + " · 用时 ${formatElapsed(session.elapsedMs)}",
+                style = MaterialTheme.typography.bodyMedium,
+                color = accent
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = "设备：${deviceLabel(session)}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        if (!session.detail.isNullOrBlank()) {
+            Text(
+                text = "详情：${session.detail}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun outcomeColor(outcome: LogOutcome): Color = when (outcome) {
+    LogOutcome.SUCCESS -> MaterialTheme.colorScheme.tertiary
+    LogOutcome.FAILED -> MaterialTheme.colorScheme.error
+    LogOutcome.RUNNING -> MaterialTheme.colorScheme.primary
+    LogOutcome.CANCELLED, LogOutcome.INTERRUPTED -> MaterialTheme.colorScheme.outline
+}
+
+private fun outcomeShort(outcome: LogOutcome): String = when (outcome) {
+    LogOutcome.SUCCESS -> "成功"
+    LogOutcome.FAILED -> "失败"
+    LogOutcome.CANCELLED -> "已取消"
+    LogOutcome.INTERRUPTED -> "中断"
+    LogOutcome.RUNNING -> "进行中"
+}
+
+private fun sessionChipLabel(session: LogSession): String =
+    "${formatClockTime(session.startedAt)} ${outcomeShort(session.outcome)}"
+
+private fun outcomeLabel(session: LogSession): String = when (session.outcome) {
+    LogOutcome.SUCCESS -> "开门成功"
+    LogOutcome.FAILED -> "开门失败（${unlockFailureShort(session.reason)}）"
+    LogOutcome.CANCELLED -> "已取消开门"
+    LogOutcome.INTERRUPTED -> "开门中断（应用曾退出）"
+    LogOutcome.RUNNING -> "开门进行中"
+}
+
+/** 系统 BLE 名称取不到时降级到脱敏 MAC；两者都没有时明确说明未获取到。 */
+private fun deviceLabel(session: LogSession): String {
+    val name = session.deviceName?.takeIf { it.isNotBlank() }
+    val mac = session.macLabel.takeIf { it.isNotBlank() && it != "未配置" }
+    return when {
+        name != null && mac != null -> "$name · $mac"
+        name != null -> name
+        mac != null -> "名称未获取到 · $mac"
+        else -> "名称未获取到"
+    }
+}
+
+private fun sessionText(session: LogSession): String = buildString {
+    append("开门日志 · ${formatClockTime(session.startedAt)}\n")
+    append("结果：${outcomeLabel(session)}\n")
+    append("设备：${deviceLabel(session)}\n")
+    append("耗时：${formatElapsed(session.elapsedMs)}\n")
+    if (!session.detail.isNullOrBlank()) append("详情：${session.detail}\n")
+    append('\n')
+    session.lines.forEach { append(it).append('\n') }
 }
 
 // ---------------------------------------------------------------------------
