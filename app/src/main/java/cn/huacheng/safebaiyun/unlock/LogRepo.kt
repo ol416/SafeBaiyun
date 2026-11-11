@@ -51,8 +51,9 @@ data class LogSession(
  *   文件以「@key=value 头部 + @body 分隔 + 一行一条日志」存储，可直接阅读与复制。
  * - 内存 [sessions] 是 UI 的单一数据源，按开始时间倒序；磁盘操作全部排在单线程 IO 队列，
  *   不会阻塞运行在 Main.immediate 上的 GATT 回调。
- * - 每次会话只在 begin / finish 落盘两次，log() 只做内存 append；仍有上限轮转，
- *   避免日志无限增长。日志目录需在备份规则中排除（见 backup_rules.xml）。
+ * - begin 先写头部占位，运行中每行按顺序追加到同一文件，finish 再整体重写：
+ *   进程在开门途中被回收时，已经写出的步骤仍留在文件里。会话数（20）与单会话行数（60）
+ *   都有上限轮转，避免日志无限增长。日志目录需在备份规则中排除（见 backup_rules.xml）。
  */
 object LogRepo {
 
@@ -110,10 +111,14 @@ object LogRepo {
     /**
      * 追加一行日志。仅供 UnlockRepo.log() 调用；找不到活跃会话时静默忽略，
      * 例如「已有开门任务进行中」的重复请求早退。
+     *
+     * 内存更新后立刻把这一行按顺序写入会话文件，因此开门途中进程被回收时，
+     * 已产生的步骤仍然可读，而不只是一个「中断」占位。
      */
     fun append(sessionId: Long, line: String) {
         if (sessionId <= 0L) return
         val safe = clean(line, MAX_LINE_LENGTH)
+        var snapshot: LogSession? = null
         synchronized(lock) {
             val current = _sessions.value
             val index = current.indexOfFirst { it.id == sessionId }
@@ -122,24 +127,35 @@ object LogRepo {
             if (target.outcome != LogOutcome.RUNNING) return
             val updated = target.copy(lines = (target.lines + safe).takeLast(MAX_LINES))
             _sessions.value = current.toMutableList().also { it[index] = updated }
+            snapshot = updated
+        }
+        val session = snapshot ?: return
+        scope.launch {
+            if (stillTracked(sessionId)) appendLine(session, safe)
         }
     }
 
     /**
-     * 连接成功后补读系统蓝牙名称。只改内存，等 finish 一并落盘，
-     * 避免多一次磁盘写入。
+     * 连接前后补读系统蓝牙名称。名称只在此刻和 finish 落盘：
+     * 进程在开门途中被回收时，中断记录里的设备行也能显示名称，
+     * 不会与日志里的「已获取门禁蓝牙名称」相互矛盾。
      */
     fun updateDeviceName(sessionId: Long, name: String?) {
         val safe = cleanNullable(name) ?: return
+        var snapshot: LogSession? = null
         synchronized(lock) {
             val current = _sessions.value
             val index = current.indexOfFirst { it.id == sessionId }
             if (index < 0) return
             val target = current[index]
             if (!target.deviceName.isNullOrBlank() || target.outcome != LogOutcome.RUNNING) return
-            _sessions.value = current.toMutableList().also {
-                it[index] = target.copy(deviceName = safe)
-            }
+            val updated = target.copy(deviceName = safe)
+            _sessions.value = current.toMutableList().also { it[index] = updated }
+            snapshot = updated
+        }
+        val session = snapshot ?: return
+        scope.launch {
+            if (stillTracked(sessionId)) writeSession(session)
         }
     }
 
@@ -232,6 +248,25 @@ object LogRepo {
         rotate()
     }
 
+    /**
+     * 进行中的会话逐行落盘，避免进程被回收后只剩元数据。
+     *
+     * 占位文件还不存在（begin 的写任务尚未执行，或被 clear 删掉）时整体重写，
+     * 保证头部完整；内存中已经到行数上限时也整体重写，把文件裁剪回 [MAX_LINES] 行。
+     */
+    private fun appendLine(session: LogSession, line: String) {
+        runCatching {
+            val directory = dir()
+            if (!directory.exists()) directory.mkdirs()
+            val target = File(directory, fileName(session.id))
+            if (!target.exists() || session.lines.size >= MAX_LINES) {
+                writeSession(session)
+            } else {
+                target.appendText(line + "\n")
+            }
+        }.onFailure { Log.w(TAG, "追加日志失败：${it.message}") }
+    }
+
     private fun writeSession(session: LogSession) {
         runCatching {
             val directory = dir()
@@ -240,7 +275,8 @@ object LogRepo {
             val target = File(directory, name)
             val tmp = File(directory, "$name.tmp")
             tmp.writeText(serialize(session))
-            if (target.exists()) target.delete()
+            // Android（Linux）的 rename 会原子替换已有文件；先 delete 会留下
+            // 「旧文件已删、新文件未就位」的窗口，此时进程被杀就只剩一条占位。
             if (!tmp.renameTo(target)) {
                 tmp.copyTo(target, overwrite = true)
                 tmp.delete()
@@ -278,6 +314,7 @@ object LogRepo {
     private fun parse(file: File): LogSession? = try {
         var id = 0L
         var startedAt = 0L
+        var format = 0
         var outcome = LogOutcome.RUNNING
         var endedAt: Long? = null
         var reason: UnlockFailure? = null
@@ -301,6 +338,7 @@ object LogRepo {
             val key = raw.substringBefore('=').removePrefix(HEADER_PREFIX)
             val value = raw.substringAfter('=', "")
             when (key) {
+                "format" -> format = value.toIntOrNull() ?: 0
                 "id" -> id = value.toLongOrNull() ?: 0L
                 "startedAt" -> startedAt = value.toLongOrNull() ?: 0L
                 "outcome" -> outcome = runCatching { LogOutcome.valueOf(value) }
@@ -314,10 +352,14 @@ object LogRepo {
             }
         }
 
-        if (id <= 0L || startedAt <= 0L) {
-            null
-        } else {
-            LogSession(
+        when {
+            id <= 0L || startedAt <= 0L -> null
+            // 以后改格式时，旧版本不认识新文件，宁可跳过也不要把字段误读成另一段记录
+            format > FORMAT_VERSION -> {
+                Log.w(TAG, "跳过格式版本过新的日志文件 ${file.name}（format=$format）")
+                null
+            }
+            else -> LogSession(
                 id = id,
                 startedAt = startedAt,
                 // 进程被杀留下的占位文件：标记为中断，而不是一直显示「进行中」

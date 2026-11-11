@@ -860,8 +860,8 @@ private fun SessionSummary(session: LogSession, accent: Color) {
             )
             Spacer(Modifier.width(6.dp))
             Text(
-                text = "${outcomeLabel(session)} · ${formatClockTime(session.startedAt)}"
-                    + " · 用时 ${formatElapsed(session.elapsedMs)}",
+                text = outcomeLabel(session) + " · " + formatClockTime(session.startedAt) +
+                    durationText(session)?.let { " · $it" }.orEmpty(),
                 style = MaterialTheme.typography.bodyMedium,
                 color = accent
             )
@@ -909,6 +909,16 @@ private fun outcomeLabel(session: LogSession): String = when (session.outcome) {
     LogOutcome.RUNNING -> "开门进行中"
 }
 
+/**
+ * 会话耗时的可读文案：进行中返回 null（不显示），中断会话返回「耗时未知」，
+ * 避免把没有结束时间的会话显示成「用时 0 毫秒」。摘要行与复制文本共用这一份逻辑。
+ */
+private fun durationText(session: LogSession): String? = when {
+    session.outcome == LogOutcome.RUNNING -> null
+    session.outcome == LogOutcome.INTERRUPTED || session.endedAt == null -> "耗时未知"
+    else -> "用时 ${formatElapsed(session.elapsedMs)}"
+}
+
 /** 系统 BLE 名称取不到时降级到脱敏 MAC；两者都没有时明确说明未获取到。 */
 private fun deviceLabel(session: LogSession): String {
     val name = session.deviceName?.takeIf { it.isNotBlank() }
@@ -925,7 +935,7 @@ private fun sessionText(session: LogSession): String = buildString {
     append("开门日志 · ${formatClockTime(session.startedAt)}\n")
     append("结果：${outcomeLabel(session)}\n")
     append("设备：${deviceLabel(session)}\n")
-    append("耗时：${formatElapsed(session.elapsedMs)}\n")
+    durationText(session)?.let { append(it).append('\n') }
     if (!session.detail.isNullOrBlank()) append("详情：${session.detail}\n")
     append('\n')
     session.lines.forEach { append(it).append('\n') }
