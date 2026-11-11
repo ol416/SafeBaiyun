@@ -56,10 +56,8 @@ object UnlockRepo {
     private const val MAX_READ_RETRIES = 3
     private const val MAX_WRITE_RETRIES = 3
     private const val DESCRIPTOR_TIMEOUT_MS = 1_500L
-    private const val MAX_LOG_LINES = 60
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val logLock = Any()
     private val cccdUuid = UUID.fromString(CCCD_UUID)
     private val descriptorQueue = ArrayDeque<Pair<BluetoothGattDescriptor, ByteArray>>()
 
@@ -89,9 +87,6 @@ object UnlockRepo {
     private val _state = MutableStateFlow<UnlockState>(UnlockState.Idle)
     val state: StateFlow<UnlockState> = _state.asStateFlow()
 
-    private val _logs = MutableStateFlow<List<String>>(emptyList())
-    val logs: StateFlow<List<String>> = _logs.asStateFlow()
-
     fun isRunning(): Boolean = _state.value is UnlockState.Running
 
     /**
@@ -109,7 +104,6 @@ object UnlockRepo {
         readableCharacteristic = null
         writeableCharacteristic = null
         resetChallengeFlow()
-        _logs.value = emptyList()
         deviceName = null
         // 单调递增，防止两次开门落在同一毫秒时共用同一个日志文件
         sessionId = maxOf(startedAt, lastSessionId + 1)
@@ -240,11 +234,7 @@ object UnlockRepo {
     private fun log(message: String) {
         Log.d(TAG, message)
         val timestamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
-        val line = "$timestamp  $message"
-        synchronized(logLock) {
-            _logs.value = (_logs.value + line).takeLast(MAX_LOG_LINES)
-        }
-        LogRepo.append(sessionId, line)
+        LogRepo.append(sessionId, "$timestamp  $message")
     }
 
     /** 结束当前日志会话；前置失败、取消、超时同样要留下记录。 */
@@ -264,10 +254,22 @@ object UnlockRepo {
     /**
      * 读取系统 BLE 名称。项目按 MAC 直连、不做扫描，蓝牙栈缓存里通常没有广播名，
      * 返回 null 是预期情况；同时兜住权限缺失时的 SecurityException。
+     *
+     * API 30+ 再用 `alias` 兜底一次：别名可能由用户或系统缓存提供，仍是纯读缓存，
+     * 不会触发扫描或额外 GATT 操作。两处都取不到就由界面回退到脱敏 MAC。
      */
     private fun readDeviceName(device: BluetoothDevice?): String? = runCatching {
-        device?.name?.trim()?.takeIf { it.isNotEmpty() }
+        device?.name?.trim()?.takeIf { it.isNotEmpty() } ?: aliasOf(device)
     }.getOrNull()
+
+    /**
+     * 部分 ROM 的 `alias` 只是 MAC 的原样回显，没有展示价值，按「未获取到」处理。
+     */
+    private fun aliasOf(device: BluetoothDevice?): String? {
+        if (device == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        val alias = device.alias?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        return alias.takeIf { !it.equals(device.address, ignoreCase = true) }
+    }
 
     private fun closeGatt() {
         challengeWaiter?.cancel()

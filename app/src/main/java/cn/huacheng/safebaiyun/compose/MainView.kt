@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -58,6 +59,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -681,14 +683,21 @@ private fun QuickActions() {
 
 @Composable
 private fun LogPanel(sessions: List<LogSession>) {
-    var expanded by remember { mutableStateOf(false) }
-    var selectedId by remember { mutableStateOf<Long?>(null) }
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    var selectedId by rememberSaveable { mutableStateOf<Long?>(null) }
     var showClearConfirm by remember { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
 
-    // selectedId 为 null 表示跟随最新会话；一旦有新开门就自动跳回实时日志
+    // selectedId 为 null 表示跟随最新会话；一旦有新开门就自动跳回实时日志。
+    // seenLatestId 一并保存：旋屏重建时 latestId 并没有变，不能把用户选中的历史会话重置掉。
     val latestId = sessions.firstOrNull()?.id
-    LaunchedEffect(latestId) { selectedId = null }
+    var seenLatestId by rememberSaveable { mutableStateOf(latestId) }
+    LaunchedEffect(latestId) {
+        if (latestId != seenLatestId) {
+            selectedId = null
+            seenLatestId = latestId
+        }
+    }
 
     val selected = sessions.find { it.id == selectedId } ?: sessions.firstOrNull()
     val accent = if (selected != null) {
@@ -767,14 +776,23 @@ private fun LogPanel(sessions: List<LogSession>) {
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         } else {
-                            current.lines.forEach { line ->
-                                Text(
-                                    text = line,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 11.sp,
-                                    lineHeight = 16.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+                            // 单会话最多 60 行，整段铺开会把页面撑出好几屏；
+                            // 这里限高并在卡片内部滚动，摘要与「复制本次」始终可见。
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 240.dp)
+                                    .verticalScroll(rememberScrollState())
+                            ) {
+                                current.lines.forEach { line ->
+                                    Text(
+                                        text = line,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 11.sp,
+                                        lineHeight = 16.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
                         }
                         Row(

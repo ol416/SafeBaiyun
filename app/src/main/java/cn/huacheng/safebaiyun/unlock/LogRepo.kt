@@ -194,17 +194,19 @@ object LogRepo {
     }
 
     /**
-     * 清空历史。保留仍在进行的会话，避免清空后日志面板空白、
-     * 而随后的 finish 又写出一条孤儿记录。
+     * 清空历史。仍在进行中的会话要整体跳过：内存里保留，磁盘文件也不删。
+     * 只删内存的话，清空后进程立刻被杀，下次就恢复不出这条记录，
+     * 与对话框承诺的「进行中的记录会保留」以及进程中断保留步骤的设计相矛盾。
      */
     fun clear() {
-        synchronized(lock) {
+        val keep = synchronized(lock) {
             _sessions.value = _sessions.value.filter { it.outcome == LogOutcome.RUNNING }
+            _sessions.value.mapTo(HashSet()) { fileName(it.id) }
         }
         scope.launch {
             runCatching {
                 dir().listFiles()?.forEach { file ->
-                    if (file.isFile) runCatching { file.delete() }
+                    if (file.isFile && file.name !in keep) runCatching { file.delete() }
                 }
             }.onFailure { Log.w(TAG, "清空日志失败：${it.message}") }
         }
