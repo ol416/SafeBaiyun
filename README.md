@@ -20,7 +20,6 @@
 - **桌面快捷方式**：一键开门，结果卡浮在桌面之上；成功 1.4 秒后自动关闭，失败可就地重试。
 - **桌面小部件**：2×2 与 2×1 两种尺寸，显示最近一次开门结果，点击即开门。
 - **本地配置与记录**：MAC / Key / 上次结果存于 `SharedPreferences`；每次开门的完整运行日志按会话存于应用私有文件，主页可翻看最近 20 次记录。两者都已从云备份和换机迁移中排除。
-- **设备名称**：开门记录会尝试读取系统蓝牙名称（API 30+ 再回退读取系统别名）；按 MAC 直连、不扫描时系统常常没有缓存名称，此时降级显示脱敏 MAC。
 - **现代化界面**：Compose + Material 3，固定品牌配色、亮暗两套主题、edge-to-edge 布局，适配 Android 5.0 ~ Android 17。
 
 ## 快速开始
@@ -135,8 +134,8 @@ app/src/main/java/cn/huacheng/safebaiyun/
 ## 隐私与权限
 
 - 仅声明 `BLUETOOTH`、`BLUETOOTH_CONNECT`、`com.android.launcher.permission.INSTALL_SHORTCUT`，**没有** `INTERNET`，也没有 `BLUETOOTH_SCAN`（只按 MAC 直连，不扫描）。
-- `android:allowBackup="true"`，但 `backup_rules.xml` 与 `data_extraction_rules.xml` 都排除了 `sharedpref/data.xml` 和日志目录 `file/unlock_logs`：MAC / Key 属于敏感凭据，日志含设备名称与逐步运行记录，均不进云备份、不参与换机迁移。
-- 日志不含 Key 明文与挑战码内容，MAC 已脱敏；系统蓝牙名称只写本地文件与界面，不进 logcat。
+- `android:allowBackup="true"`，但 `backup_rules.xml` 与 `data_extraction_rules.xml` 都排除了 `sharedpref/data.xml` 和日志目录 `file/unlock_logs`：MAC / Key 属于敏感凭据，日志含逐步运行记录，均不进云备份、不参与换机迁移。
+- 日志不含 Key 明文与挑战码内容，MAC 已脱敏。
 - 没有蓝牙的设备也能安装查看说明，不会因缺少硬件特性被商店过滤。
 
 ## 常见问题
@@ -155,9 +154,6 @@ Glance 小部件在 Android 12 以下兼容性有限，建议升级系统或改�
 
 **Q: 能同时管理多个门禁吗？**
 当前只保存一套 MAC / Key，一次只能控制一台门禁。
-
-**Q: 日志里的「设备」为什么显示「名称未获取到」？**
-本项目按 MAC 直连、不做蓝牙扫描，Android 蓝牙栈缓存里通常没有该设备的广播名，`BluetoothDevice.name` 会返回空。连接前后各尝试读取一次，Android 11 及以上还会再回退读取系统别名 `alias`（同样只读缓存，不触发扫描或额外的 GATT 操作）；仍取不到就显示脱敏 MAC。这不影响开门，也不会为此申请扫描权限。
 
 **Q: 开门日志会保存多久？**
 本机保留最近 20 次会话、每次最多 60 行，超出自动轮转；可在主页日志面板中复制或清空。日志不参与云备份与换机迁移，卸载 App 即全部删除。

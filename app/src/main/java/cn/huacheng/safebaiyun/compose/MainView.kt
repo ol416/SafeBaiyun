@@ -937,17 +937,9 @@ private fun durationText(session: LogSession): String? = when {
     else -> "用时 ${formatElapsed(session.elapsedMs)}"
 }
 
-/** 系统 BLE 名称取不到时降级到脱敏 MAC；两者都没有时明确说明未获取到。 */
-private fun deviceLabel(session: LogSession): String {
-    val name = session.deviceName?.takeIf { it.isNotBlank() }
-    val mac = session.macLabel.takeIf { it.isNotBlank() && it != "未配置" }
-    return when {
-        name != null && mac != null -> "$name · $mac"
-        name != null -> name
-        mac != null -> "名称未获取到 · $mac"
-        else -> "名称未获取到"
-    }
-}
+/** 设备行只展示脱敏 MAC；未配置时明确说明。 */
+private fun deviceLabel(session: LogSession): String =
+    session.macLabel.takeIf { it.isNotBlank() } ?: "未配置"
 
 private fun sessionText(session: LogSession): String = buildString {
     append("开门日志 · ${formatClockTime(session.startedAt)}\n")

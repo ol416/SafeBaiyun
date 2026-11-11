@@ -81,8 +81,6 @@ object UnlockRepo {
     // 当前日志会话 id（同时用作 LogRepo 的文件名）；0 表示没有活跃会话
     private var sessionId = 0L
     private var lastSessionId = 0L
-    // 系统 BLE 名称：按 MAC 直连、不扫描时不保证能取到，取不到由界面回退到脱敏 MAC
-    private var deviceName: String? = null
 
     private val _state = MutableStateFlow<UnlockState>(UnlockState.Idle)
     val state: StateFlow<UnlockState> = _state.asStateFlow()
@@ -104,11 +102,10 @@ object UnlockRepo {
         readableCharacteristic = null
         writeableCharacteristic = null
         resetChallengeFlow()
-        deviceName = null
         // 单调递增，防止两次开门落在同一毫秒时共用同一个日志文件
         sessionId = maxOf(startedAt, lastSessionId + 1)
         lastSessionId = sessionId
-        LogRepo.begin(sessionId, startedAt, DeviceConfig.maskMac(config.first), null)
+        LogRepo.begin(sessionId, startedAt, DeviceConfig.maskMac(config.first))
 
         if (!DataRepo.isConfigured()) {
             fail(UnlockFailure.NO_CONFIG, persist = false)
@@ -142,16 +139,6 @@ object UnlockRepo {
 
         try {
             val device = adapter.getRemoteDevice(config.first)
-            deviceName = readDeviceName(device)
-            LogRepo.updateDeviceName(sessionId, deviceName)
-            // 名称本身不写进 logcat / 运行日志，只记录是否取到
-            log(
-                if (deviceName == null) {
-                    "未获取到门禁蓝牙名称，日志中显示脱敏 MAC"
-                } else {
-                    "已获取门禁蓝牙名称"
-                }
-            )
             gatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)
             } else {
@@ -251,26 +238,6 @@ object UnlockRepo {
         sessionId = 0L
     }
 
-    /**
-     * 读取系统 BLE 名称。项目按 MAC 直连、不做扫描，蓝牙栈缓存里通常没有广播名，
-     * 返回 null 是预期情况；同时兜住权限缺失时的 SecurityException。
-     *
-     * API 30+ 再用 `alias` 兜底一次：别名可能由用户或系统缓存提供，仍是纯读缓存，
-     * 不会触发扫描或额外 GATT 操作。两处都取不到就由界面回退到脱敏 MAC。
-     */
-    private fun readDeviceName(device: BluetoothDevice?): String? = runCatching {
-        device?.name?.trim()?.takeIf { it.isNotEmpty() } ?: aliasOf(device)
-    }.getOrNull()
-
-    /**
-     * 部分 ROM 的 `alias` 只是 MAC 的原样回显，没有展示价值，按「未获取到」处理。
-     */
-    private fun aliasOf(device: BluetoothDevice?): String? {
-        if (device == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
-        val alias = device.alias?.trim()?.takeIf { it.isNotEmpty() } ?: return null
-        return alias.takeIf { !it.equals(device.address, ignoreCase = true) }
-    }
-
     private fun closeGatt() {
         challengeWaiter?.cancel()
         challengeWaiter = null
@@ -319,15 +286,6 @@ object UnlockRepo {
             when {
                 status == BluetoothGatt.GATT_SUCCESS && newState == BluetoothGatt.STATE_CONNECTED -> {
                     _state.value = UnlockState.Running(UnlockStep.DISCOVERING)
-                    // 连接前蓝牙栈缓存里往往还没有名字，连上后再补读一次
-                    if (deviceName.isNullOrBlank()) {
-                        val connectedName = readDeviceName(gatt?.device)
-                        if (connectedName != null) {
-                            deviceName = connectedName
-                            LogRepo.updateDeviceName(sessionId, connectedName)
-                            log("连接后补读到门禁蓝牙名称")
-                        }
-                    }
                     val started = gatt?.discoverServices() == true
                     log(if (started) "已连接，开始发现服务" else "discoverServices 启动失败")
                     if (!started) {

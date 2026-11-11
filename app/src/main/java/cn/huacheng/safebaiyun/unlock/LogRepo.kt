@@ -37,7 +37,6 @@ data class LogSession(
     val endedAt: Long? = null,
     val reason: UnlockFailure? = null,
     val detail: String? = null,
-    val deviceName: String? = null,
     val macLabel: String = "",
     val elapsedMs: Long = 0L,
     val lines: List<String> = emptyList()
@@ -88,12 +87,11 @@ object LogRepo {
     /**
      * 开启一次会话并写入占位文件。id 由调用方保证唯一（同时用作文件名）。
      */
-    fun begin(id: Long, startedAt: Long, macLabel: String, deviceName: String?) {
+    fun begin(id: Long, startedAt: Long, macLabel: String) {
         val session = LogSession(
             id = id,
             startedAt = startedAt,
-            macLabel = clean(macLabel, MAX_FIELD_LENGTH),
-            deviceName = cleanNullable(deviceName)
+            macLabel = clean(macLabel, MAX_FIELD_LENGTH)
         )
         synchronized(lock) {
             _sessions.value = (listOf(session) + _sessions.value.filter { it.id != id })
@@ -132,30 +130,6 @@ object LogRepo {
         val session = snapshot ?: return
         scope.launch {
             if (stillTracked(sessionId)) appendLine(session, safe)
-        }
-    }
-
-    /**
-     * 连接前后补读系统蓝牙名称。名称只在此刻和 finish 落盘：
-     * 进程在开门途中被回收时，中断记录里的设备行也能显示名称，
-     * 不会与日志里的「已获取门禁蓝牙名称」相互矛盾。
-     */
-    fun updateDeviceName(sessionId: Long, name: String?) {
-        val safe = cleanNullable(name) ?: return
-        var snapshot: LogSession? = null
-        synchronized(lock) {
-            val current = _sessions.value
-            val index = current.indexOfFirst { it.id == sessionId }
-            if (index < 0) return
-            val target = current[index]
-            if (!target.deviceName.isNullOrBlank() || target.outcome != LogOutcome.RUNNING) return
-            val updated = target.copy(deviceName = safe)
-            _sessions.value = current.toMutableList().also { it[index] = updated }
-            snapshot = updated
-        }
-        val session = snapshot ?: return
-        scope.launch {
-            if (stillTracked(sessionId)) writeSession(session)
         }
     }
 
@@ -306,7 +280,6 @@ object LogRepo {
         append("@endedAt=${session.endedAt ?: ""}\n")
         append("@reason=${session.reason?.name ?: ""}\n")
         append("@detail=${cleanNullable(session.detail).orEmpty()}\n")
-        append("@deviceName=${cleanNullable(session.deviceName).orEmpty()}\n")
         append("@macLabel=${clean(session.macLabel, MAX_FIELD_LENGTH)}\n")
         append("@elapsedMs=${session.elapsedMs}\n")
         append(BODY_MARKER).append('\n')
@@ -321,7 +294,6 @@ object LogRepo {
         var endedAt: Long? = null
         var reason: UnlockFailure? = null
         var detail: String? = null
-        var deviceName: String? = null
         var macLabel = ""
         var elapsedMs = 0L
         var inBody = false
@@ -348,7 +320,6 @@ object LogRepo {
                 "endedAt" -> endedAt = value.toLongOrNull()
                 "reason" -> reason = runCatching { UnlockFailure.valueOf(value) }.getOrNull()
                 "detail" -> detail = value.takeIf { it.isNotEmpty() }
-                "deviceName" -> deviceName = value.takeIf { it.isNotEmpty() }
                 "macLabel" -> macLabel = value
                 "elapsedMs" -> elapsedMs = value.toLongOrNull() ?: 0L
             }
@@ -373,7 +344,6 @@ object LogRepo {
                 endedAt = endedAt,
                 reason = reason,
                 detail = detail,
-                deviceName = deviceName,
                 macLabel = macLabel,
                 elapsedMs = elapsedMs,
                 lines = lines.takeLast(MAX_LINES)
