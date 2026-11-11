@@ -574,7 +574,7 @@ private fun DeviceCard(mac: String, key: String, onEdit: () -> Unit) {
             }
             DeviceRow(
                 label = "MAC",
-                value = if (mac.isBlank()) "未配置" else mac,
+                value = if (mac.isBlank()) "未配置" else DeviceConfig.maskMac(mac),
                 monospace = true,
                 trailing = if (mac.isBlank()) null else {
                     {
